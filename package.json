@@ -1,0 +1,31 @@
+{
+  "name": "andbox",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Sandboxed JavaScript runtime with Worker isolation, RPC, import maps, and timeouts",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "sandbox",
+    "worker",
+    "isolation",
+    "rpc",
+    "browser",
+    "javascript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/andbox"
+  }
+}
