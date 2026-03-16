@@ -27,5 +27,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/johnhenry/andbox"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   }
 }
