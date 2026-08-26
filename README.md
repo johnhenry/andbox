@@ -1,8 +1,10 @@
 # andbox
 
-Sandboxed JavaScript runtime with Worker isolation, RPC capabilities, import maps, and timeouts.
+A separate-context JavaScript runtime with Worker isolation, RPC capabilities, import maps, and timeouts.
 
-andbox runs untrusted JavaScript in an isolated Web Worker with a structured bridge back to the host. Code in the sandbox can call host-provided "capabilities" via RPC, use import-mapped packages, and define virtual modules -- all with configurable rate limits, timeouts, and hard-kill semantics.
+andbox runs JavaScript in a dedicated Web Worker with a structured bridge back to the host. Code in that Worker can call host-provided "capabilities" via RPC, use import-mapped packages, and define virtual modules -- all with configurable rate limits, timeouts, and hard-kill semantics.
+
+**andbox's job is running code in its own context with a clean RPC surface, not containing adversarial code.** The Worker boundary keeps well-behaved code from touching the DOM or host globals by accident, and gives you rate limits, timeouts, and a kill switch for code you trust but don't want to block on or grant unrestricted access to. It is **not** a security sandbox: code that specifically tries to escape can reach `fetch`, `WebSocket`, `Worker`, and other Worker-global APIs directly, and the capability gate can be bypassed via the prototype chain (`host.call('constructor', ...)`). See [Security model](#security-model) before using andbox to run code you don't trust.
 
 Zero dependencies. Uses only Web Workers and standard browser APIs.
 
@@ -65,9 +67,9 @@ await sandbox.dispose();
 
 andbox supports three execution modes:
 
-- **`worker`** (default) -- Full Worker-based isolation with RPC bridge, import maps, virtual modules, and hard-kill timeout semantics.
-- **`inline`** -- Same-thread execution via AsyncFunction. Lighter weight, no Worker overhead, but no true isolation. Useful for trusted code.
-- **`data-uri`** -- Dynamic `import()` via Blob URL. Module-level isolation without a Worker. Supports globals injection.
+- **`worker`** (default) -- Runs in a dedicated Worker with an RPC bridge, import maps, virtual modules, and hard-kill timeout semantics. See [Security model](#security-model) for what this does and doesn't protect against.
+- **`inline`** -- Same-thread execution via AsyncFunction. Lighter weight, no Worker overhead, no isolation at all -- code runs with full access to the calling context. Only for code you already trust.
+- **`data-uri`** -- Dynamic `import()` via Blob URL. Module-level separation without a Worker. Supports globals injection.
 
 ```js
 // Inline mode (no Worker)
@@ -150,14 +152,14 @@ Resolves a module specifier against an import map, following the browser import 
 
 ### `createNetworkFetch(allowedHosts?, fetchFn?)`
 
-Creates a fetch function that only allows requests to specified hostnames.
+Creates a fetch function that checks the request hostname against an allowlist before calling through. Useful for keeping cooperative code pointed at the hosts you intend -- **not redirect-safe** (see [Security model](#security-model)): an allowlisted host that responds with a redirect is followed without re-checking the final URL.
 
 ```js
 import { createNetworkFetch } from 'andbox';
 
-const safeFetch = createNetworkFetch(['api.example.com']);
-await safeFetch('https://api.example.com/data'); // OK
-await safeFetch('https://evil.com/steal');        // throws
+const gatedFetch = createNetworkFetch(['api.example.com']);
+await gatedFetch('https://api.example.com/data'); // OK
+await gatedFetch('https://evil.com/steal');        // throws
 ```
 
 ### `createStdio()`
@@ -172,15 +174,27 @@ Promise and error utilities used internally, also available for consumers.
 
 Returns the Worker script source code as a string (useful for custom Worker setups).
 
-## Isolation Model
+## Execution model
 
-Code runs inside a Web Worker created from a Blob URL. The worker has:
+Code runs inside a Web Worker created from a Blob URL. This gets you, for free, against code that isn't specifically trying to defeat it:
 
 - **No DOM access** -- Workers are inherently isolated from the document
-- **No direct host references** -- Communication only via `postMessage` RPC
-- **Capability gating** -- Host functions are wrapped with rate limits before exposure
-- **Hard kill** -- On timeout, the Worker is `terminate()`d and a fresh one is created
-- **Virtual modules** -- Modules defined via `defineModule()` are available via `sandboxImport()`
+- **No direct host object references** -- only what's explicitly passed in (capabilities, globals, import map entries) is reachable, so ordinary code can't accidentally touch host-side state
+- **Hard kill** -- on timeout, the Worker is `terminate()`d and a fresh one is created for the next call
+- **Virtual modules** -- modules defined via `defineModule()` are available via `sandboxImport()`
+- **Capability rate limits** -- `gateCapabilities()` caps calls/concurrency/payload size per capability, for cooperative callers
+
+## Security model
+
+andbox is **not** a boundary against code that is actively trying to escape it. If you're running code you don't fully trust, read this section -- every item below is a confirmed way sandboxed code can act outside what `capabilities`/`policy`/`createNetworkFetch` appear to allow:
+
+- **Worker-global APIs are directly reachable, regardless of `capabilities`.** Sandboxed code executes in a real Worker global scope, so `fetch`, `WebSocket`, `Worker` (nested workers), `importScripts`, `indexedDB`, and `self.postMessage` are all callable directly -- omitting a `fetch` capability does not block network access.
+- **`gateCapabilities()`'s check can be bypassed via the prototype chain.** `host.call('constructor', ...)` resolves through `Object.prototype` to the real global `Object` constructor, bypassing the capability allowlist, rate limits, and call accounting entirely.
+- **`createNetworkFetch()`'s allowlist is not redirect-safe.** It checks the request hostname before the fetch, not the final response URL -- an allowlisted host that redirects (an open redirector, or a compromised endpoint) can steer the request anywhere.
+- **`sandboxImport()` will load and execute an arbitrary remote URL.** Any `http(s)://` specifier is passed straight to `import()` with no allowlist, independent of any network policy configured for capabilities.
+- **A timeout stops message delivery, not in-flight host-side effects.** If a capability call with a real side effect (a write, an API call) is in flight when the timeout fires, that side effect still completes on the host even though the Worker is killed.
+
+If you need to run untrusted/adversarial code safely, andbox alone is not sufficient -- pair it with OS-level isolation (a separate process/container with its own network and filesystem restrictions) or use a purpose-built sandboxing runtime. Capability gating and rate limits here are for organizing and throttling code you already trust, not for containing code you don't.
 
 ## License
 
