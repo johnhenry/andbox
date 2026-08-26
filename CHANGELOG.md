@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.0 (2026-08-25)
+
+Republished as `@johnhenry/andbox`, restarting the version line at `0.0.0`.
+Previously published as `andbox@0.1.1` (unscoped). No functional changes.
+
 ## 0.1.0 (2026-03-15)
 
 Initial release.

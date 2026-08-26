@@ -9,19 +9,22 @@ Zero dependencies. Uses only Web Workers and standard browser APIs.
 ## Install
 
 ```bash
-npm install andbox
+npm install @johnhenry/andbox
 ```
 
 Or via CDN (no bundler needed):
 
 ```js
-import { createSandbox } from 'https://esm.sh/andbox';
+import { createSandbox } from 'https://esm.sh/@johnhenry/andbox';
 ```
+
+> **Provenance:** previously published as `andbox@0.1.1`. This package restarts
+> versioning at `0.0.0` under the `@johnhenry` scope.
 
 ## Quick Start
 
 ```js
-import { createSandbox } from 'andbox';
+import { createSandbox } from '@johnhenry/andbox';
 
 const sandbox = await createSandbox({
   capabilities: {
@@ -133,7 +136,7 @@ Returns runtime statistics including pending evaluations, virtual modules, and g
 Wraps host functions with rate limiting and payload caps.
 
 ```js
-import { gateCapabilities } from 'andbox';
+import { gateCapabilities } from '@johnhenry/andbox';
 
 const { gated, stats } = gateCapabilities(
   { fetch: async (url) => (await fetch(url)).text() },
@@ -153,7 +156,7 @@ Resolves a module specifier against an import map, following the browser import 
 Creates a fetch function that only allows requests to specified hostnames.
 
 ```js
-import { createNetworkFetch } from 'andbox';
+import { createNetworkFetch } from '@johnhenry/andbox';
 
 const safeFetch = createNetworkFetch(['api.example.com']);
 await safeFetch('https://api.example.com/data'); // OK
