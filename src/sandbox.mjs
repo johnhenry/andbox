@@ -142,7 +142,6 @@ async function createWorkerSandbox(options = {}) {
 
   // Track virtual modules for re-creation on restart
   const virtualModules = new Map();
-  let evalSeq = 0;
   let disposed = false;
   let worker = null;
   let workerBlobURL = null;
@@ -277,7 +276,10 @@ async function createWorkerSandbox(options = {}) {
     if (disposed) throw new Error('Sandbox is disposed');
     if (!worker) await restartWorker();
 
-    const id = ++evalSeq;
+    // Random (not sequential) id so code running during one evaluate() call
+    // can't guess the id of a concurrent evaluate() on the same worker and
+    // forge a matching message to interfere with it.
+    const id = crypto.randomUUID();
     const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs;
     const { promise, resolve, reject } = makeDeferred();
 
