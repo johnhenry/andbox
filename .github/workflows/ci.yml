@@ -15,3 +15,5 @@ jobs:
         with:
           node-version: 24
       - run: npm test
+      - name: Examples smoke test
+        run: npm run examples
