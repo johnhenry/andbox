@@ -33,7 +33,6 @@ export function makeWorkerSource() {
 let importMap = { imports: {}, scopes: {} };
 let baseURL = 'https://andbox.local/';
 const virtualModules = new Map();
-let evalSeq = 0;
 
 // ── Import Map Resolver (inlined) ──
 function resolveWithImportMap(specifier, map, parentURL) {
@@ -101,11 +100,12 @@ async function sandboxImport(specifier) {
 }
 
 // ── Capability RPC ──
-let rpcSeq = 0;
 const pendingRpc = new Map();
 
 function callCapability(name, args) {
-  const id = ++rpcSeq;
+  // Random (not sequential) id -- see host-side evaluate() for rationale:
+  // predictable ids let concurrent code guess and forge matching messages.
+  const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     pendingRpc.set(id, { resolve, reject });
     self.postMessage({ type: 'capabilityCall', id, name, args });
@@ -160,8 +160,7 @@ self.onmessage = async ({ data: msg }) => {
     }
 
     case 'evaluate': {
-      const evalId = ++evalSeq;
-      const fwdConsole = makeForwardingConsole(evalId);
+      const fwdConsole = makeForwardingConsole(msg.id);
       try {
         // Wrap in async function for top-level await
         const asyncFn = new Function(

@@ -70,4 +70,31 @@ describe('gateCapabilities', () => {
     await assert.rejects(() => gated.fn(), /Concurrent call limit exceeded/);
     await p1;
   });
+
+  it('does not expose Object.prototype members through the gated object', async () => {
+    const caps = { greet: () => 'hi' };
+    const { gated } = gateCapabilities(caps);
+
+    // Plain-object property lookups for these names would normally resolve
+    // through Object.prototype to real global functions/values, bypassing
+    // any capability allowlist. gateCapabilities() must not expose them.
+    assert.equal(gated.constructor, undefined);
+    assert.equal(gated.toString, undefined);
+    assert.equal(gated.hasOwnProperty, undefined);
+    assert.equal(gated.valueOf, undefined);
+    assert.equal(gated.__proto__, undefined);
+    assert.equal(Object.getPrototypeOf(gated), null);
+  });
+
+  it('rejects calls for unknown/prototype-chain capability names at the gate boundary', async () => {
+    const caps = { greet: () => 'hi' };
+    const { gated } = gateCapabilities(caps);
+
+    // The gate itself only defines own-properties for granted capabilities;
+    // callers (e.g. sandbox.mjs's handleCapabilityCall) rely on `gated[name]`
+    // being strictly undefined for anything not explicitly granted.
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      assert.equal(gated[name], undefined, `gated['${name}'] should be undefined`);
+    }
+  });
 });

@@ -37,7 +37,10 @@ export function gateCapabilities(capabilities, policy = {}) {
     return perCap.get(name);
   }
 
-  const gated = {};
+  // Object.create(null) — no Object.prototype chain, so lookups for names
+  // like 'constructor' or 'toString' cannot resolve through the prototype
+  // to real global functions and bypass the allowlist/rate limiting below.
+  const gated = Object.create(null);
 
   for (const [name, fn] of Object.entries(capabilities)) {
     const capLimits = { ...DEFAULT_CAPABILITY_LIMITS, ...capPolicies[name] };
