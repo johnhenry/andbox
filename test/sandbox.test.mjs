@@ -18,6 +18,29 @@ describe('sandbox module', () => {
   });
 });
 
+// mode: 'service-worker' needs navigator.serviceWorker (a real browser),
+// which Node does not have at all -- but the option-validation that runs
+// *before* touching navigator.serviceWorker is real code, real Node-side
+// behavior, and worth asserting on directly (see andbox#14: Node has no
+// ServiceWorkerGlobalScope, so a real registration can't be tested here).
+describe('sandbox module — service-worker mode option validation', () => {
+  it('rejects with a clear error when scriptURL is missing', async () => {
+    const { createSandbox } = await import('../src/sandbox.mjs');
+    await assert.rejects(
+      () => createSandbox({ mode: 'service-worker' }),
+      /requires a scriptURL/
+    );
+  });
+
+  it('rejects with a clear error when navigator.serviceWorker is unavailable (true under Node)', async () => {
+    const { createSandbox } = await import('../src/sandbox.mjs');
+    await assert.rejects(
+      () => createSandbox({ mode: 'service-worker', scriptURL: 'https://example.com/sw.js' }),
+      /requires navigator\.serviceWorker/
+    );
+  });
+});
+
 describe('index re-exports', () => {
   it('exports all public API', async () => {
     const mod = await import('../src/index.mjs');
@@ -31,6 +54,8 @@ describe('index re-exports', () => {
     assert.equal(typeof mod.makeAbortError, 'function');
     assert.equal(typeof mod.makeTimeoutError, 'function');
     assert.equal(typeof mod.makeWorkerSource, 'function');
+    assert.equal(typeof mod.makeServiceWorkerSource, 'function');
+    assert.equal(typeof mod.resolveServiceWorkerResponse, 'function');
     assert.equal(typeof mod.DEFAULT_TIMEOUT_MS, 'number');
     assert.ok(mod.DEFAULT_LIMITS);
     assert.ok(mod.DEFAULT_CAPABILITY_LIMITS);
