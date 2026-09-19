@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.2
 
 - Added `createVirtualModuleRegistry()`: takes a `path → source` map, mints
   one real `blob:` URL per entry (generalizing the single-file
