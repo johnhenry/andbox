@@ -182,6 +182,31 @@ describe('createVirtualModuleRegistry — resolveSpecifier()', () => {
     }
   });
 
+  it('case 2: a registered path containing # or ? is not truncated when resolving against it', () => {
+    // parentPath is a map key, not a URL -- a literal '#'/'?' in it must not
+    // be parsed as the *base* URL's own fragment/query delimiter, which
+    // would silently drop everything after it before relative resolution
+    // even runs (andbox#13 review).
+    const registry = createVirtualModuleRegistry({
+      'weird#hash/index.js': 'export {};',
+      'weird#hash/util.js': 'export {};',
+      'weird?q/index.js': 'export {};',
+      'weird?q/util.js': 'export {};',
+    });
+    try {
+      assert.equal(
+        registry.resolveSpecifier('./util.js', 'weird#hash/index.js'),
+        registry.resolve('weird#hash/util.js')
+      );
+      assert.equal(
+        registry.resolveSpecifier('./util.js', 'weird?q/index.js'),
+        registry.resolve('weird?q/util.js')
+      );
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('case 2: a relative specifier pointing at an unregistered path resolves to null', () => {
     const registry = createVirtualModuleRegistry({ 'index.js': 'export {};' });
     try {

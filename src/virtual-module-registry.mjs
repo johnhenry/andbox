@@ -154,11 +154,22 @@ export function createVirtualModuleRegistry(files = {}, options = {}) {
  * is *not* treated as opaque/"cannot be a base URL"), resolve `specifier`
  * against that, and strip the scheme back off.
  *
+ * `parentPath` is a registered map key, not a URL -- it may legitimately
+ * contain `#`/`?`/other URL-delimiter characters as literal path text, so
+ * each segment is percent-encoded before being embedded in the synthetic
+ * base URL (otherwise a `#`/`?` in `parentPath` would be parsed as the
+ * *base URL's own* fragment/query, silently truncating everything after it
+ * before relative resolution even runs). `specifier` is left as-is: it's
+ * resolved with real URL relative-reference semantics on purpose, so a
+ * literal `#`/`?` in a specifier is treated as a fragment/query exactly as
+ * it would be in a real module specifier or href.
+ *
  * @param {string} parentPath
  * @param {string} specifier
  * @returns {string}
  */
 function resolveRelativePath(parentPath, specifier) {
-  const resolved = new URL(specifier, `vfs:///${parentPath}`);
+  const encodedParent = parentPath.split('/').map(encodeURIComponent).join('/');
+  const resolved = new URL(specifier, `vfs:///${encodedParent}`);
   return decodeURIComponent(resolved.pathname.slice(1));
 }
