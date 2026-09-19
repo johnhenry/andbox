@@ -18,7 +18,8 @@
     "example:02": "node examples/02-capability-limits-cut-off-abuse.mjs",
     "example:03": "node examples/03-network-allowlist-blocks-unapproved-hosts.mjs",
     "example:04": "node examples/04-runaway-code-gets-timed-out.mjs",
-    "examples": "npm run example:01 && npm run example:02 && npm run example:03 && npm run example:04"
+    "example:05": "node examples/05-virtual-module-registry-resolves-a-multi-file-tree.mjs",
+    "examples": "npm run example:01 && npm run example:02 && npm run example:03 && npm run example:04 && npm run example:05"
   },
   "keywords": [
     "sandbox",

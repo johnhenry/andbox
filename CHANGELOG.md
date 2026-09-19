@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added `createVirtualModuleRegistry()`: takes a `path → source` map, mints
+  one real `blob:` URL per entry (generalizing the single-file
+  `Blob`/`createObjectURL` pattern `data-uri` mode already used), and
+  resolves module specifiers across the tree -- import-map resolution via
+  `resolveWithImportMap()` first, then a new relative-path (`./`, `../`)
+  fallback against the known file table, then `null` for anything
+  genuinely external. Closes [#13](https://github.com/johnhenry/andbox/issues/13).
+
 ## 0.0.1
 
 First real publish under the `@johnhenry` scope -- `0.0.0` below was never

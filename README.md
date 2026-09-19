@@ -153,6 +153,28 @@ const { gated, stats } = gateCapabilities(
 
 Resolves a module specifier against an import map, following the browser import map algorithm.
 
+### `createVirtualModuleRegistry(files?, options?)`
+
+Takes a `path → source` map and mints one real `blob:` URL per entry (the same `new Blob([...]) + URL.createObjectURL()` pattern `data-uri` mode uses, generalized to a whole file table). Returns a registry for a multi-file tree that references itself by relative path -- an entry module `import`-ing `./util.js`, which itself imports `../shared/x.js`, and so on.
+
+```js
+import { createVirtualModuleRegistry } from '@johnhenry/andbox';
+
+const registry = createVirtualModuleRegistry({
+  'index.js': 'import { add } from "./util.js"; export const result = add(2, 3);',
+  'util.js': 'export function add(a, b) { return a + b; }',
+});
+
+registry.resolve('index.js');                       // blob: URL, or null if unknown
+registry.resolveSpecifier('./util.js', 'index.js');  // resolves relative to the importing file
+registry.define('extra.js', 'export const x = 1;');  // register (or replace) a file at runtime
+registry.dispose();                                  // revokes every blob URL it ever minted
+```
+
+`resolveSpecifier(specifier, parentPath?)` checks, in order: (1) import-map resolution via `resolveWithImportMap()` -- not reimplemented, just delegated, with `parentPath`'s own blob URL passed through as `parentURL` so `scopes` apply; (2) a relative-path (`./`, `../`) fallback looked up against the registry's own file table, which `resolveWithImportMap()` alone has no notion of; (3) `null` if neither matched, e.g. a genuine external bare specifier -- left for the caller to handle, not swallowed.
+
+**Honest caveat:** this only solves module *resolution* (the URL a given specifier should point at), not automatic rewriting of `import` statements inside the source text, and not general asset URLs (`<img src>`, CSS `url()`) or navigation. A `blob:` URL has no hierarchical path of its own, so a literal `import "./util.js"` statement inside blob-served source will **not** resolve on its own in a browser -- call `resolveSpecifier()` yourself with the specifier your loader saw and use the URL it returns (or rewrite the specifier to that URL before creating the blob). See [andbox#13](https://github.com/johnhenry/andbox/issues/13) for the full design discussion, and [andbox#14](https://github.com/johnhenry/andbox/issues/14) for the harder "make it behave like a real server" problem this deliberately does not attempt to solve.
+
 ### `createNetworkFetch(allowedHosts?, fetchFn?)`
 
 Creates a fetch function that checks the request hostname against an allowlist before calling through. Useful for keeping cooperative code pointed at the hosts you intend -- **not redirect-safe** (see [Security model](#security-model)): an allowlisted host that responds with a redirect is followed without re-checking the final URL.
