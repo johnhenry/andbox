@@ -8,7 +8,28 @@
   resolves module specifiers across the tree -- import-map resolution via
   `resolveWithImportMap()` first, then a new relative-path (`./`, `../`)
   fallback against the known file table, then `null` for anything
-  genuinely external. Closes [#13](https://github.com/johnhenry/andbox/issues/13).
+  genuinely external. A registered path containing `#`/`?` used to be
+  parsed as the synthetic base URL's own fragment/query delimiter during
+  that relative-path resolution, silently truncating everything after it
+  (found in review); each path segment is now percent-encoded before
+  resolution. Closes [#13](https://github.com/johnhenry/andbox/issues/13).
+- Added a fourth `mode: 'service-worker'`: registers a Service Worker
+  backing a `path → content` map with real, same-origin, HTTP-shaped
+  fetch/navigation semantics, for hosting a small virtual multi-file site
+  rather than executing JS in isolation. Can optionally pull served
+  content from a `createVirtualModuleRegistry()` instance instead of a
+  second path table. Documents (and handles, via `clients.claim()` plus a
+  "don't navigate into scope until registration is active" contract) the
+  Service-Worker-doesn't-control-the-first-navigation gotcha, and is
+  explicit in the README that this mode does not provide isolation by
+  merely existing -- real isolation needs a genuinely separate origin, same
+  framing as the existing Security model section already uses for `worker`
+  mode. The registration-activation wait originally only listened for
+  `'activated'`, so a registration that instead became `'redundant'` (its
+  install/activate threw, or it failed to parse) hung forever with no
+  timeout (found in review); it now rejects on `'redundant'` and is bounded
+  by `timeoutMs` (defaults to `DEFAULT_TIMEOUT_MS`) as defense in depth.
+  Closes [#14](https://github.com/johnhenry/andbox/issues/14).
 
 ## 0.0.1
 

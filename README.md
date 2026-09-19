@@ -68,11 +68,12 @@ await sandbox.dispose();
 
 ## Sandbox Modes
 
-andbox supports three execution modes:
+andbox supports four execution modes:
 
 - **`worker`** (default) -- Runs in a dedicated Worker with an RPC bridge, import maps, virtual modules, and hard-kill timeout semantics. See [Security model](#security-model) for what this does and doesn't protect against.
 - **`inline`** -- Same-thread execution via AsyncFunction. Lighter weight, no Worker overhead, no isolation at all -- code runs with full access to the calling context. Only for code you already trust.
 - **`data-uri`** -- Dynamic `import()` via Blob URL. Module-level separation without a Worker. Supports globals injection.
+- **`service-worker`** -- Not code execution at all: registers a Service Worker that serves an in-memory `path → content` map with real HTTP-shaped fetch/navigation semantics. For hosting a small virtual multi-file site (HTML/CSS/JS, arbitrary paths), not for running JS in isolation. See [andbox#14](https://github.com/johnhenry/andbox/issues/14) and [Security model](#security-model) -- this mode does **not** provide isolation by merely existing.
 
 ```js
 // Inline mode (no Worker)
@@ -82,6 +83,15 @@ const result = await inline.execute('return math.sqrt(16)');
 // Data-URI mode
 const dataUri = createSandbox({ mode: 'data-uri', globals: { x: 42 } });
 const result = await dataUri.execute('print(x)');
+
+// Service-Worker mode (browser only -- see examples/06-service-worker-mode/)
+const site = await createSandbox({
+  mode: 'service-worker',
+  scriptURL: '/andbox-sw.js', // you serve makeServiceWorkerSource()'s output here
+  scope: '/virtual/',
+  files: { '/virtual/hello.html': '<h1>Hello</h1>' },
+});
+// Only navigate into scope *after* this resolves -- see Security model.
 ```
 
 ## API
@@ -199,6 +209,51 @@ Promise and error utilities used internally, also available for consumers.
 
 Returns the Worker script source code as a string (useful for custom Worker setups).
 
+### `createSandbox({ mode: 'service-worker', ... })`
+
+Registers a Service Worker that backs a `path → content` map with real, same-origin, HTTP-shaped fetch and navigation semantics -- see [andbox#14](https://github.com/johnhenry/andbox/issues/14). Unlike the other three modes, this isn't code execution: it's for hosting a small virtual multi-file site (an in-memory archive of HTML/CSS/JS/anything) so that relative links, absolute-path links, runtime-computed `fetch()` calls, and `pushState`-based routing all work exactly as they would against a real server, because it *is* real HTTP-shaped navigation, transparently intercepted.
+
+**Options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `scriptURL` | `string` | **Required.** A real same-origin `http(s)` URL where you are already serving `makeServiceWorkerSource()`'s output. Service Worker registration requires a real `http(s)` scriptURL -- unlike `worker`/`data-uri` mode, a `blob:` URL is not accepted by the platform. |
+| `scope` | `string` | Path prefix to register the Service Worker under. Defaults to `scriptURL`'s own directory. |
+| `files` | `Record<string, string \| { body, contentType?, status?, headers? }>` | Initial served-file map. |
+| `registry` | `VirtualModuleRegistry` | A [`createVirtualModuleRegistry()`](#createvirtualmoduleregistryfiles-options) instance to pull additional served content from -- its known paths' real blob content is fetched and merged in, reusing its path/blob bookkeeping instead of a second one. |
+| `timeoutMs` | `number` | Max time to wait for the registration to become active before rejecting. Defaults to `DEFAULT_TIMEOUT_MS`. |
+
+**Returns:** `Promise<{ scriptURL, scope, define(path, source, opts?), remove(path), dispose(), isDisposed() }>`. The promise resolves once the registration is **active**, rejects if it instead becomes `'redundant'` (its install/activate threw, or it failed to parse) or if `timeoutMs` elapses first -- see the ordering note in [Security model](#security-model) below before navigating anything into `scope`.
+
+```js
+import { createSandbox } from '@johnhenry/andbox';
+
+const site = await createSandbox({
+  mode: 'service-worker',
+  scriptURL: '/andbox-sw.js', // you serve makeServiceWorkerSource()'s output here
+  scope: '/virtual/',
+  files: {
+    '/virtual/hello.html': { body: '<h1>Hello</h1>', contentType: 'text/html' },
+  },
+});
+
+// Only now -- with the registration active -- point something at the scope:
+iframe.src = '/virtual/hello.html';
+
+await site.define('/virtual/about.html', '<h1>About</h1>');
+await site.dispose(); // unregisters the Service Worker
+```
+
+See `examples/06-service-worker-mode/` for a complete, runnable (browser-only) demo, including the dev server that serves the generated script.
+
+### `makeServiceWorkerSource()`
+
+Returns the Service Worker script source code as a string, for `mode: 'service-worker'`. Unlike `makeWorkerSource()`'s output (turned into a `blob:` URL for `new Worker(...)`), this string must be served as a real same-origin file -- Service Worker registration doesn't accept `blob:` scriptURLs.
+
+### `resolveServiceWorkerResponse(pathname, files)`
+
+Given a request pathname and a served-file map (`Map` or plain object), returns the `Response` the Service Worker's `fetch` handler would produce for an in-scope request, or `null` if it should fall through to the network. The pure logic factored out of the generated script, for testing and for embedding the same matching behavior elsewhere.
+
 ## Execution model
 
 Code runs inside a Web Worker created from a Blob URL. This gets you, for free, against code that isn't specifically trying to defeat it:
@@ -216,6 +271,8 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 - **Worker-global APIs are directly reachable, regardless of `capabilities`.** Sandboxed code executes in a real Worker global scope, so `fetch`, `WebSocket`, `Worker` (nested workers), `importScripts`, `indexedDB`, and `self.postMessage` are all callable directly -- omitting a `fetch` capability does not block network access. This is fundamental to how `Function`-based evaluation works and isn't fixable without a different execution strategy (e.g. a cross-origin iframe with a strict CSP, or a Realms/Compartments-based approach). See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
 - **`sandboxImport()` will load and execute an arbitrary remote URL.** Any `http(s)://` specifier is passed straight to `import()` with no allowlist, independent of any network policy configured for capabilities. See [andbox#7](https://github.com/johnhenry/andbox/issues/7).
 - **A timeout stops message delivery, not in-flight host-side effects.** If a capability call with a real side effect (a write, an API call) is in flight when the timeout fires, that side effect still completes on the host even though the Worker is killed. Capabilities with real side effects should be designed to be idempotent and/or cancellable via `AbortSignal`. See [andbox#8](https://github.com/johnhenry/andbox/issues/8).
+- **`mode: 'service-worker'` does not provide isolation by merely existing.** It's a hosting mechanism -- a real Service Worker, same-origin by default, serving your `files` map with real fetch/navigation interception. Content served through it can see and touch its own origin exactly like any other same-origin page can; nothing about registering a Service Worker sandboxes what runs inside the pages it serves. If you're hosting content you don't fully trust, point this mode at a genuinely separate origin from day one -- the same recommendation the `fetch`/`WebSocket`/`Worker` item above makes for `worker` mode (a cross-origin iframe with a strict CSP), not something bolted on after the fact. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
+- **The Service Worker does not control the very first navigation into its scope.** A page/iframe navigation into `scope` that happens *before* the registration has finished activating is a normal, unintercepted network request -- Service Workers never retroactively intercept a request that already went out. `createSandbox({ mode: 'service-worker' })`'s returned promise only resolves once the registration is active (its generated script also calls `clients.claim()` on activate, which helps *already-open* clients but not fresh navigations); the documented, load-bearing contract is: don't navigate anything into `scope` until that promise resolves. Do that and every request is intercepted from the first byte, because the registration already matches `scope` before the navigation request is made. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 
 Fixed as of this audit (kept here for history -- see the linked issues for details):
 

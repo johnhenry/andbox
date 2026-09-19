@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>andbox — service-worker mode demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+    iframe { width: 100%; height: 220px; border: 1px solid #ccc; }
+    pre { background: #f4f4f4; padding: 0.75rem; white-space: pre-wrap; word-break: break-word; }
+    code { background: #f0f0f0; padding: 0.1rem 0.3rem; }
+  </style>
+</head>
+<body>
+  <h1>andbox — <code>service-worker</code> mode</h1>
+  <p>
+    This page registers a Service Worker (the exact script
+    <code>makeServiceWorkerSource()</code> generates, served live by
+    <code>serve.mjs</code> at <code>/andbox-sw.js</code>) scoped to
+    <code>/virtual/</code>, defines two in-memory pages, then points an
+    iframe at one of them -- no server round trip for that content, just
+    an in-memory <code>path → content</code> map intercepted via
+    <code>fetch</code>.
+  </p>
+  <p>Status: <strong id="status">not started</strong></p>
+  <pre id="log"></pre>
+
+  <h2>Served from the virtual file map</h2>
+  <iframe id="frame" title="virtual page"></iframe>
+
+  <h2>A path NOT in the file map</h2>
+  <p>Falls through to the network -- this dev server's own honest 404, not the andbox Service Worker swallowing it.</p>
+  <button id="check-passthrough">Check pass-through</button>
+  <pre id="passthrough-log"></pre>
+
+  <script type="module" src="./main.mjs"></script>
+</body>
+</html>

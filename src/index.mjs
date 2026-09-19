@@ -13,3 +13,5 @@ export { createNetworkFetch } from './network-policy.mjs';
 export { makeDeferred, makeAbortError, makeTimeoutError } from './deferred.mjs';
 export { DEFAULT_TIMEOUT_MS, DEFAULT_LIMITS, DEFAULT_CAPABILITY_LIMITS } from './constants.mjs';
 export { makeWorkerSource } from './worker-source.mjs';
+export { makeServiceWorkerSource } from './service-worker-source.mjs';
+export { resolveServiceWorkerResponse } from './service-worker-response.mjs';
