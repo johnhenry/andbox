@@ -236,6 +236,49 @@ export declare function createStdio(): StdioStream;
  */
 export declare function makeWorkerSource(): string;
 
+// ── service-worker-source ──
+
+/**
+ * Generate the Service Worker source code as a string, for `mode:
+ * 'service-worker'`.
+ *
+ * Unlike makeWorkerSource() (whose output becomes a `blob:` URL passed to
+ * `new Worker(...)`), Service Worker registration requires a real
+ * same-origin http(s) scriptURL — a `blob:` URL is not accepted by the
+ * platform. The caller is responsible for serving this string's content at
+ * whatever path it passes as `scriptURL` to `createSandbox()`.
+ *
+ * @returns The complete Service Worker script source code as a string.
+ */
+export declare function makeServiceWorkerSource(): string;
+
+// ── service-worker-response ──
+
+/** A file served by `mode: 'service-worker'`. */
+export interface ServedFile {
+  body: string | ArrayBuffer;
+  contentType?: string;
+  status?: number;
+  headers?: Record<string, string>;
+}
+
+/**
+ * Given a request pathname and the known served-file map, produce the
+ * Response the Service Worker's `fetch` handler would return for an
+ * in-scope request, or null if it should fall through to the network.
+ *
+ * Pure logic factored out of the generated Service Worker script so it's
+ * testable under plain Node (which has no `ServiceWorkerGlobalScope` at
+ * all, but does have real `Response`/`Headers` globals).
+ *
+ * @param pathname
+ * @param files  path → served-file map (Map or plain object)
+ */
+export declare function resolveServiceWorkerResponse(
+  pathname: string,
+  files: Map<string, ServedFile> | Record<string, ServedFile>,
+): Response | null;
+
 // ── sandbox ──
 
 /** Options for evaluate(). */
@@ -309,10 +352,58 @@ export interface Sandbox {
   isDisposed(): boolean;
 }
 
+/** Options for createSandbox({ mode: 'service-worker' }). */
+export interface ServiceWorkerSandboxOptions {
+  /** Mode discriminant. */
+  mode: 'service-worker';
+  /**
+   * Real same-origin http(s) URL serving makeServiceWorkerSource()'s
+   * output. A blob: URL is not accepted by the platform for Service
+   * Worker registration.
+   */
+  scriptURL: string;
+  /** Scope to register the Service Worker under. Defaults to scriptURL's own directory. */
+  scope?: string;
+  /** Initial path → content map. */
+  files?: Record<string, string | ServedFile>;
+  /**
+   * A #13 virtual module registry to pull additional served content from
+   * (its known paths' real blob content), reusing its path/blob
+   * bookkeeping instead of a second one.
+   */
+  registry?: VirtualModuleRegistry;
+}
+
+/** A registered Service Worker instance backing a path → content map. */
+export interface ServiceWorkerSandbox {
+  /** The scriptURL this Service Worker was registered from. */
+  scriptURL: string;
+  /** The registration's actual scope. */
+  scope: string;
+  /**
+   * Register (or replace) one served file.
+   *
+   * @param path
+   * @param source
+   * @param entryOpts  contentType/status/headers overrides
+   */
+  define(
+    path: string,
+    source: string,
+    entryOpts?: { contentType?: string; status?: number; headers?: Record<string, string> },
+  ): Promise<void>;
+  /** Remove a served file; requests for it fall through to the network. */
+  remove(path: string): Promise<void>;
+  /** Unregister the Service Worker. */
+  dispose(): Promise<void>;
+  /** Returns true if dispose() has been called. */
+  isDisposed(): boolean;
+}
+
 /**
  * Create a new sandboxed JavaScript runtime.
  *
- * The sandbox runs in an isolated Web Worker with:
+ * The default (Worker) mode runs in an isolated Web Worker with:
  * - RPC-based capability calls (host.call)
  * - Import map resolution
  * - Virtual module definitions
@@ -320,7 +411,15 @@ export interface Sandbox {
  * - Console forwarding
  * - Capability gating with rate limits
  *
+ * `mode: 'service-worker'` is a different shape entirely: it hosts a
+ * path → content map behind a real, same-origin, HTTP-shaped scope
+ * instead of evaluating code — see andbox#14 and README's Security model
+ * section before using it for untrusted content.
+ *
  * @param options  Sandbox configuration options.
  * @returns A promise that resolves to the sandbox instance.
  */
 export declare function createSandbox(options?: SandboxOptions): Promise<Sandbox>;
+export declare function createSandbox(
+  options: ServiceWorkerSandboxOptions,
+): Promise<ServiceWorkerSandbox>;

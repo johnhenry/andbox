@@ -101,6 +101,174 @@ ${preamble}${code}`;
   };
 }
 
+// ── Service-Worker sandbox (path→content hosting, real URL/navigation semantics) ──
+
+const CONTENT_TYPE_BY_EXTENSION = {
+  html: 'text/html;charset=utf-8',
+  css: 'text/css;charset=utf-8',
+  js: 'text/javascript;charset=utf-8',
+  mjs: 'text/javascript;charset=utf-8',
+  json: 'application/json;charset=utf-8',
+  svg: 'image/svg+xml',
+  txt: 'text/plain;charset=utf-8',
+};
+
+function guessContentType(path) {
+  const ext = path.split('.').pop();
+  return CONTENT_TYPE_BY_EXTENSION[ext] || 'application/octet-stream';
+}
+
+function normalizeServedEntry(path, value, defaults = {}) {
+  if (typeof value === 'string') {
+    return {
+      body: value,
+      contentType: defaults.contentType || guessContentType(path),
+      status: defaults.status || 200,
+      headers: defaults.headers || {},
+    };
+  }
+  return {
+    body: value.body,
+    contentType: value.contentType || defaults.contentType || guessContentType(path),
+    status: value.status || defaults.status || 200,
+    headers: value.headers || defaults.headers || {},
+  };
+}
+
+function normalizeServedFileMap(map) {
+  const out = {};
+  for (const [path, value] of Object.entries(map)) {
+    out[path] = normalizeServedEntry(path, value);
+  }
+  return out;
+}
+
+/** Resolve once the registration's worker has activated (or already has). */
+function waitForActive(registration) {
+  if (registration.active) return Promise.resolve();
+  const worker = registration.installing || registration.waiting;
+  if (!worker) return Promise.resolve();
+  return new Promise((resolve) => {
+    worker.addEventListener('statechange', function onChange() {
+      if (worker.state === 'activated') {
+        worker.removeEventListener('statechange', onChange);
+        resolve();
+      }
+    });
+  });
+}
+
+/**
+ * @typedef {Object} ServiceWorkerSandboxOptions
+ * @property {string} scriptURL - Real same-origin http(s) URL serving makeServiceWorkerSource()'s output. A blob: URL is not accepted by the platform for Service Worker registration.
+ * @property {string} [scope] - Scope to register the Service Worker under. Defaults to scriptURL's own directory.
+ * @property {Record<string, string | { body: string, contentType?: string, status?: number, headers?: Record<string,string> }>} [files] - Initial path→content map.
+ * @property {import('./virtual-module-registry.mjs').VirtualModuleRegistry} [registry] - A #13 virtual module registry to pull additional served content from, reusing its path/blob bookkeeping instead of a second one.
+ */
+
+/**
+ * Register a Service Worker that backs a path→content map with real
+ * HTTP-shaped fetch/navigation semantics -- see andbox#14.
+ *
+ * Requires `navigator.serviceWorker` (a real browser). The generated
+ * script (`makeServiceWorkerSource()`) cannot be registered from a
+ * `blob:` URL -- the caller must already be serving it at a real
+ * same-origin `scriptURL`.
+ *
+ * @param {ServiceWorkerSandboxOptions} [options]
+ */
+async function createServiceWorkerSandbox(options = {}) {
+  const { scriptURL, scope, files = {}, registry } = options;
+
+  if (!scriptURL) {
+    throw new Error(
+      "createSandbox({ mode: 'service-worker' }) requires a scriptURL: the real " +
+      "same-origin http(s) URL where you are already serving makeServiceWorkerSource()'s " +
+      'output. Service Worker registration requires a real http(s) scriptURL -- unlike ' +
+      "worker/data-uri mode, a blob: URL is not accepted by the platform. See andbox#14."
+    );
+  }
+  if (typeof navigator === 'undefined' || !navigator.serviceWorker) {
+    throw new Error(
+      "mode: 'service-worker' requires navigator.serviceWorker (a real browser); " +
+      'it is not available under Node. See andbox#14.'
+    );
+  }
+
+  let disposed = false;
+
+  // Build the initial served-file map. Reuse a #13 virtual module registry's
+  // own path/blob bookkeeping when given one, rather than a second table:
+  // pull each of its known paths' real content straight from its blob URLs.
+  const initialFiles = { ...files };
+  if (registry) {
+    for (const path of registry.paths()) {
+      const url = registry.resolve(path);
+      const res = await fetch(url);
+      initialFiles[path] = { body: await res.text(), contentType: guessContentType(path) };
+    }
+  }
+
+  const registration = await navigator.serviceWorker.register(
+    scriptURL,
+    scope ? { scope } : undefined
+  );
+
+  // Only resolve once this registration is active. This -- combined with
+  // the documented contract "don't navigate anything into scope until this
+  // promise resolves" -- is what actually avoids the first-navigation race
+  // described in andbox#14 and in makeServiceWorkerSource()'s doc comment:
+  // clients.claim() (called in the generated script's activate handler)
+  // only takes over clients that are *already open*; it doesn't retroactively
+  // intercept a navigation into scope that started before activation.
+  await waitForActive(registration);
+
+  async function send(message) {
+    if (disposed) throw new Error('Sandbox is disposed');
+    const target = registration.active;
+    if (!target) throw new Error('Service Worker is not active');
+    const { promise, resolve } = makeDeferred();
+    const channel = new MessageChannel();
+    channel.port1.onmessage = ({ data }) => resolve(data);
+    target.postMessage(message, [channel.port2]);
+    return promise;
+  }
+
+  await send({ type: 'configure', files: normalizeServedFileMap(initialFiles) });
+
+  /**
+   * Register (or replace) one served file.
+   * @param {string} path
+   * @param {string} source
+   * @param {{ contentType?: string, status?: number, headers?: Record<string,string> }} [entryOpts]
+   */
+  async function define(path, source, entryOpts = {}) {
+    const entry = normalizeServedEntry(path, source, entryOpts);
+    await send({ type: 'define', path, entry });
+  }
+
+  /** Remove a served file; requests for it fall through to the network. */
+  async function remove(path) {
+    await send({ type: 'remove', path });
+  }
+
+  /** Unregister the Service Worker. */
+  async function dispose() {
+    if (disposed) return;
+    disposed = true;
+    await registration.unregister();
+  }
+
+  return {
+    scriptURL,
+    scope: registration.scope,
+    define,
+    remove,
+    dispose,
+    isDisposed: () => disposed,
+  };
+}
+
 /**
  * @typedef {Object} SandboxOptions
  * @property {{ imports?: Record<string,string>, scopes?: Record<string,Record<string,string>> }} [importMap]
@@ -114,13 +282,14 @@ ${preamble}${code}`;
 /**
  * Create a new sandboxed runtime.
  *
- * @param {SandboxOptions} [options]
- * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean }>}
+ * @param {SandboxOptions | ServiceWorkerSandboxOptions} [options]
+ * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
  */
 export function createSandbox(options = {}) {
   const mode = options.mode || 'worker';
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
+  if (mode === 'service-worker') return createServiceWorkerSandbox(options);
   return createWorkerSandbox(options);
 }
 
