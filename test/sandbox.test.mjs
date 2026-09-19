@@ -23,6 +23,7 @@ describe('index re-exports', () => {
     const mod = await import('../src/index.mjs');
     assert.equal(typeof mod.createSandbox, 'function');
     assert.equal(typeof mod.resolveWithImportMap, 'function');
+    assert.equal(typeof mod.createVirtualModuleRegistry, 'function');
     assert.equal(typeof mod.gateCapabilities, 'function');
     assert.equal(typeof mod.createStdio, 'function');
     assert.equal(typeof mod.createNetworkFetch, 'function');
