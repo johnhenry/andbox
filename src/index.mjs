@@ -6,6 +6,7 @@
 
 export { createSandbox } from './sandbox.mjs';
 export { resolveWithImportMap } from './import-map-resolver.mjs';
+export { createVirtualModuleRegistry } from './virtual-module-registry.mjs';
 export { gateCapabilities } from './capability-gate.mjs';
 export { createStdio } from './stdio.mjs';
 export { createNetworkFetch } from './network-policy.mjs';
