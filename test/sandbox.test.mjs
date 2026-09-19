@@ -41,6 +41,53 @@ describe('sandbox module — service-worker mode option validation', () => {
   });
 });
 
+// waitForActive() only touches plain properties/EventTarget methods on
+// `registration`/its worker -- real coverage doesn't need an actual
+// ServiceWorkerRegistration, a mock EventTarget-based double is enough
+// (found in review: the original version had no 'redundant'/timeout
+// handling at all and could hang forever on a failed registration).
+describe('sandbox module — waitForActive()', () => {
+  function makeMockWorker(initialState) {
+    const worker = new EventTarget();
+    worker.state = initialState;
+    worker.setState = (state) => {
+      worker.state = state;
+      worker.dispatchEvent(new Event('statechange'));
+    };
+    return worker;
+  }
+
+  it('resolves immediately when registration.active is already set', async () => {
+    const { waitForActive } = await import('../src/sandbox.mjs');
+    await waitForActive({ active: makeMockWorker('activated') });
+  });
+
+  it('resolves once the installing worker reaches "activated"', async () => {
+    const { waitForActive } = await import('../src/sandbox.mjs');
+    const worker = makeMockWorker('installing');
+    const promise = waitForActive({ active: null, installing: worker });
+    worker.setState('activated');
+    await promise;
+  });
+
+  it('rejects when the worker reaches "redundant" instead of activating', async () => {
+    const { waitForActive } = await import('../src/sandbox.mjs');
+    const worker = makeMockWorker('installing');
+    const promise = waitForActive({ active: null, installing: worker });
+    worker.setState('redundant');
+    await assert.rejects(promise, /redundant/);
+  });
+
+  it('rejects with a timeout error instead of hanging forever if no terminal state is ever reached', async () => {
+    const { waitForActive } = await import('../src/sandbox.mjs');
+    const worker = makeMockWorker('installing');
+    await assert.rejects(
+      waitForActive({ active: null, installing: worker }, 10),
+      /timed out|timeout/i
+    );
+  });
+});
+
 describe('index re-exports', () => {
   it('exports all public API', async () => {
     const mod = await import('../src/index.mjs');

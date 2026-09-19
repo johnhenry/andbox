@@ -221,8 +221,9 @@ Registers a Service Worker that backs a `path → content` map with real, same-o
 | `scope` | `string` | Path prefix to register the Service Worker under. Defaults to `scriptURL`'s own directory. |
 | `files` | `Record<string, string \| { body, contentType?, status?, headers? }>` | Initial served-file map. |
 | `registry` | `VirtualModuleRegistry` | A [`createVirtualModuleRegistry()`](#createvirtualmoduleregistryfiles-options) instance to pull additional served content from -- its known paths' real blob content is fetched and merged in, reusing its path/blob bookkeeping instead of a second one. |
+| `timeoutMs` | `number` | Max time to wait for the registration to become active before rejecting. Defaults to `DEFAULT_TIMEOUT_MS`. |
 
-**Returns:** `Promise<{ scriptURL, scope, define(path, source, opts?), remove(path), dispose(), isDisposed() }>`. The promise resolves only once the registration is **active** -- see the ordering note in [Security model](#security-model) below before navigating anything into `scope`.
+**Returns:** `Promise<{ scriptURL, scope, define(path, source, opts?), remove(path), dispose(), isDisposed() }>`. The promise resolves once the registration is **active**, rejects if it instead becomes `'redundant'` (its install/activate threw, or it failed to parse) or if `timeoutMs` elapses first -- see the ordering note in [Security model](#security-model) below before navigating anything into `scope`.
 
 ```js
 import { createSandbox } from '@johnhenry/andbox';

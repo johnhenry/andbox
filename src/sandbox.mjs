@@ -143,18 +143,41 @@ function normalizeServedFileMap(map) {
   return out;
 }
 
-/** Resolve once the registration's worker has activated (or already has). */
-function waitForActive(registration) {
+/**
+ * Resolve once the registration's worker has activated (or already has).
+ * Rejects if the worker instead reaches `'redundant'` (its install/activate
+ * threw, failed to parse, or was superseded before activating) -- without
+ * this check the returned promise would otherwise hang forever, since
+ * `'redundant'` is a valid terminal state `statechange` fires for that
+ * is neither `'activated'` nor another `statechange` event to wait on.
+ * Also bounded by `timeoutMs` as defense in depth for any lifecycle path
+ * that reaches neither terminal state.
+ */
+export function waitForActive(registration, timeoutMs = DEFAULT_TIMEOUT_MS) {
   if (registration.active) return Promise.resolve();
   const worker = registration.installing || registration.waiting;
   if (!worker) return Promise.resolve();
-  return new Promise((resolve) => {
-    worker.addEventListener('statechange', function onChange() {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      worker.removeEventListener('statechange', onChange);
+      reject(makeTimeoutError(timeoutMs));
+    }, timeoutMs);
+    function onChange() {
       if (worker.state === 'activated') {
+        clearTimeout(timer);
         worker.removeEventListener('statechange', onChange);
         resolve();
+      } else if (worker.state === 'redundant') {
+        clearTimeout(timer);
+        worker.removeEventListener('statechange', onChange);
+        reject(new Error(
+          "Service Worker registration became 'redundant' before activating -- " +
+          'its install/activate handler likely threw, or it failed to parse. ' +
+          'Check the browser console for the actual Service Worker error.'
+        ));
       }
-    });
+    }
+    worker.addEventListener('statechange', onChange);
   });
 }
 
@@ -164,6 +187,7 @@ function waitForActive(registration) {
  * @property {string} [scope] - Scope to register the Service Worker under. Defaults to scriptURL's own directory.
  * @property {Record<string, string | { body: string, contentType?: string, status?: number, headers?: Record<string,string> }>} [files] - Initial path→content map.
  * @property {import('./virtual-module-registry.mjs').VirtualModuleRegistry} [registry] - A #13 virtual module registry to pull additional served content from, reusing its path/blob bookkeeping instead of a second one.
+ * @property {number} [timeoutMs] - Max time to wait for the registration to activate before rejecting. Defaults to DEFAULT_TIMEOUT_MS.
  */
 
 /**
@@ -178,7 +202,7 @@ function waitForActive(registration) {
  * @param {ServiceWorkerSandboxOptions} [options]
  */
 async function createServiceWorkerSandbox(options = {}) {
-  const { scriptURL, scope, files = {}, registry } = options;
+  const { scriptURL, scope, files = {}, registry, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
 
   if (!scriptURL) {
     throw new Error(
@@ -221,7 +245,7 @@ async function createServiceWorkerSandbox(options = {}) {
   // clients.claim() (called in the generated script's activate handler)
   // only takes over clients that are *already open*; it doesn't retroactively
   // intercept a navigation into scope that started before activation.
-  await waitForActive(registration);
+  await waitForActive(registration, timeoutMs);
 
   async function send(message) {
     if (disposed) throw new Error('Sandbox is disposed');
