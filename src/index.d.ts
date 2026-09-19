@@ -133,6 +133,64 @@ export declare function resolveWithImportMap(
   parentURL?: string,
 ): string | null;
 
+// ── virtual-module-registry ──
+
+/** A registry of in-memory files, each backed by its own `blob:` URL. */
+export interface VirtualModuleRegistry {
+  /**
+   * Get the `blob:` URL registered for a path.
+   *
+   * @param path
+   * @returns the blob URL, or null if the path is unknown
+   */
+  resolve(path: string): string | null;
+
+  /**
+   * Resolve a module specifier the way `import` would need to, from the
+   * point of view of a given importing file: import-map resolution first,
+   * then a relative-path (`./x.js`, `../x.js`) fallback against the known
+   * file table, then null if neither matched.
+   *
+   * @param specifier
+   * @param parentPath  path of the file doing the importing
+   * @returns a resolved URL, or null if nothing matched
+   */
+  resolveSpecifier(specifier: string, parentPath?: string): string | null;
+
+  /**
+   * Register (or replace) a file at runtime. Replacing an existing path
+   * revokes its previous blob URL before minting a new one.
+   *
+   * @returns the new blob URL
+   */
+  define(path: string, source: string): string;
+
+  /** Whether a path is registered. */
+  has(path: string): boolean;
+
+  /** All registered paths. */
+  paths(): string[];
+
+  /** Revoke every blob URL this registry has ever minted. */
+  dispose(): void;
+
+  /** Whether dispose() has been called. */
+  isDisposed(): boolean;
+}
+
+/**
+ * Create a registry of in-memory files, each backed by its own `blob:`
+ * URL, with specifier resolution that combines import-map resolution
+ * with a relative-path fallback against the known file table.
+ *
+ * @param files      path → source text
+ * @param options    optional import map used for bare-specifier resolution
+ */
+export declare function createVirtualModuleRegistry(
+  files?: Record<string, string>,
+  options?: { importMap?: ImportMap },
+): VirtualModuleRegistry;
+
 // ── network-policy ──
 
 /**
