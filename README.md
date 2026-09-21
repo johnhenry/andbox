@@ -1,5 +1,11 @@
 # andbox
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fandbox.svg)](https://www.npmjs.com/package/@johnhenry/andbox)
+[![CI](https://github.com/johnhenry/andbox/actions/workflows/ci.yml/badge.svg)](https://github.com/johnhenry/andbox/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fandbox.svg)](LICENSE)
+
+Full documentation: [opensource.johnhenry.me/andbox](https://opensource.johnhenry.me/andbox/)
+
 A separate-context JavaScript runtime with Worker isolation, RPC capabilities, import maps, and timeouts.
 
 andbox runs JavaScript in a dedicated Web Worker with a structured bridge back to the host. Code in that Worker can call host-provided "capabilities" via RPC, use import-mapped packages, and define virtual modules -- all with configurable rate limits, timeouts, and hard-kill semantics.
@@ -7,6 +13,16 @@ andbox runs JavaScript in a dedicated Web Worker with a structured bridge back t
 **andbox's job is running code in its own context with a clean RPC surface, not containing adversarial code.** The Worker boundary keeps well-behaved code from touching the DOM or host globals by accident, and gives you rate limits, timeouts, and a kill switch for code you trust but don't want to block on or grant unrestricted access to. It is **not** a security sandbox: code that specifically tries to escape can reach `fetch`, `WebSocket`, `Worker`, and other Worker-global APIs directly, regardless of what capabilities you grant. See [Security model](#security-model) before using andbox to run code you don't trust.
 
 Zero dependencies. Uses only Web Workers and standard browser APIs.
+
+## Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Sandbox Modes](#sandbox-modes)
+- [API](#api)
+- [Execution model](#execution-model)
+- [Security model](#security-model)
+- [License](#license)
 
 ## Install
 
