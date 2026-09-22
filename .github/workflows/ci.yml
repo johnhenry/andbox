@@ -8,12 +8,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: npm test
-      - name: Examples smoke test
-        run: npm run examples
+    uses: johnhenry/workflows/.github/workflows/ci.yml@v1
+    with:
+      node-versions: '["24"]'
+      os: '["ubuntu-latest"]'
+      # andbox has no committed package-lock.json.
+      install-command: npm install
+      node-cache: ""
+      gate-commands: |
+        npm test
+        npm run examples
