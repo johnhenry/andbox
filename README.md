@@ -22,6 +22,7 @@ Zero dependencies. Uses only Web Workers and standard browser APIs.
 - [API](#api)
 - [Execution model](#execution-model)
 - [Security model](#security-model)
+- [Family](#family)
 - [License](#license)
 
 ## Install
@@ -282,7 +283,18 @@ Code runs inside a Web Worker created from a Blob URL. This gets you, for free, 
 
 ## Security model
 
-andbox is **not** a boundary against code that is actively trying to escape it. If you're running code you don't fully trust, read this section -- every item below is a confirmed way sandboxed code can act outside what `capabilities`/`policy`/`createNetworkFetch` appear to allow:
+andbox is **not** a boundary against code that is actively trying to escape it. If you're running code you don't fully trust, read this section before you rely on `capabilities`/`policy`/`createNetworkFetch` for anything.
+
+**What andbox guarantees:**
+
+- **No DOM access.** Worker-mode code executes in a real Worker global scope, which has no `document`, `window`, or other DOM references -- this is a platform property of Workers, not something andbox has to enforce itself.
+- **No implicit host object references.** Only what you explicitly pass in (`capabilities`, `globals`, import map entries) is reachable from sandboxed code -- ordinary (non-adversarial) code cannot accidentally read or mutate host-side state it wasn't given a reference to.
+- **Hard kill on timeout.** `evaluate()` calls that exceed `timeoutMs` `terminate()` the Worker outright and start a fresh one for the next call -- this is a real process-level kill, not a cooperative cancellation the running code could ignore. See "still yours" below for what a kill does *not* undo.
+- **The capability gate cannot be walked around via the prototype chain.** `gateCapabilities()` builds the gated object with `Object.create(null)`, so `host.call('constructor', ...)` cannot resolve through `Object.prototype` to the real global `Object` constructor. Previously fixed; see [andbox#5](https://github.com/johnhenry/andbox/issues/5).
+- **`createNetworkFetch()`'s allowlist is redirect-safe.** Requests are made with `redirect: 'manual'` and any redirect response is rejected outright, so an allowlisted host cannot silently redirect a caller to a non-allowlisted one. Previously fixed; see [andbox#6](https://github.com/johnhenry/andbox/issues/6).
+- **`gateCapabilities()` enforces call/argument-size/concurrency caps per capability**, for cooperative callers that stay within the capabilities you actually granted.
+
+**What is still yours:**
 
 - **Worker-global APIs are directly reachable, regardless of `capabilities`.** Sandboxed code executes in a real Worker global scope, so `fetch`, `WebSocket`, `Worker` (nested workers), `importScripts`, `indexedDB`, and `self.postMessage` are all callable directly -- omitting a `fetch` capability does not block network access. This is fundamental to how `Function`-based evaluation works and isn't fixable without a different execution strategy (e.g. a cross-origin iframe with a strict CSP, or a Realms/Compartments-based approach). See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
 - **`sandboxImport()` will load and execute an arbitrary remote URL.** Any `http(s)://` specifier is passed straight to `import()` with no allowlist, independent of any network policy configured for capabilities. See [andbox#7](https://github.com/johnhenry/andbox/issues/7).
@@ -290,12 +302,22 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 - **`mode: 'service-worker'` does not provide isolation by merely existing.** It's a hosting mechanism -- a real Service Worker, same-origin by default, serving your `files` map with real fetch/navigation interception. Content served through it can see and touch its own origin exactly like any other same-origin page can; nothing about registering a Service Worker sandboxes what runs inside the pages it serves. If you're hosting content you don't fully trust, point this mode at a genuinely separate origin from day one -- the same recommendation the `fetch`/`WebSocket`/`Worker` item above makes for `worker` mode (a cross-origin iframe with a strict CSP), not something bolted on after the fact. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 - **The Service Worker does not control the very first navigation into its scope.** A page/iframe navigation into `scope` that happens *before* the registration has finished activating is a normal, unintercepted network request -- Service Workers never retroactively intercept a request that already went out. `createSandbox({ mode: 'service-worker' })`'s returned promise only resolves once the registration is active (its generated script also calls `clients.claim()` on activate, which helps *already-open* clients but not fresh navigations); the documented, load-bearing contract is: don't navigate anything into `scope` until that promise resolves. Do that and every request is intercepted from the first byte, because the registration already matches `scope` before the navigation request is made. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 
-Fixed as of this audit (kept here for history -- see the linked issues for details):
-
-- ~~`gateCapabilities()`'s check could be bypassed via the prototype chain~~ (`host.call('constructor', ...)` resolved through `Object.prototype` to the real global `Object` constructor). Fixed by building the gated object with `Object.create(null)`. See [andbox#5](https://github.com/johnhenry/andbox/issues/5).
-- ~~`createNetworkFetch()`'s allowlist was not redirect-safe~~ (it checked the request hostname before the fetch, not the final response URL). Fixed by fetching with `redirect: 'manual'` and rejecting any redirect response outright. See [andbox#6](https://github.com/johnhenry/andbox/issues/6).
-
 If you need to run untrusted/adversarial code safely, andbox alone is not sufficient -- pair it with OS-level isolation (a separate process/container with its own network and filesystem restrictions) or use a purpose-built sandboxing runtime. Capability gating and rate limits here are for organizing and throttling code you already trust, not for containing code you don't.
+
+## Family
+
+andbox isn't just a standalone sandbox runtime -- it's the sandboxing engine
+that [aimatey](https://github.com/johnhenry/aimatey) middleware wires in for
+code-based tool execution.
+
+- **[`@johnhenry/aimatey-middleware-andbox`](https://github.com/johnhenry/aimatey-middleware-andbox)** --
+  wires andbox's `createSandbox()` factory (or a pre-built sandbox) into an
+  [aimatey](https://github.com/johnhenry/aimatey) bridge middleware, via
+  `toolsToCapabilities()` to convert the middleware's `tools`/`executeToolFn`
+  into andbox `capabilities`. This package's own [Security model](#security-model)
+  is the source of truth for what that capability gate does and does not
+  guarantee -- the middleware's Security model section points back here
+  rather than repeating it.
 
 ## License
 
