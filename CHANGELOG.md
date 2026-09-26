@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.3
+
+- Fixed the package's `exports` map: it was a bare `"./src/index.mjs"`
+  string with no `types` condition and no top-level `types` field, even
+  though `src/index.d.ts` ships in the package. TypeScript's `Bundler` /
+  `Node16`/`Node20` module resolution only consults the `exports` map when
+  present and ignores sibling `.d.ts` files, so
+  `import { createSandbox } from '@johnhenry/andbox'` reported TS7016
+  despite the declarations existing right there. Added a top-level `types`
+  field and a `types` condition in the `exports` map (there is only the
+  one `.` entry). Closes [#19](https://github.com/johnhenry/andbox/issues/19).
+
 ## 0.0.2
 
 - Added `createVirtualModuleRegistry()`: takes a `path → source` map, mints
