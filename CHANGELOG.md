@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.0.6
+
+Closes the remaining Node-mode gaps from 0.0.4/0.0.5.
+
+- **Virtual modules import each other under Node.** Worker-thread virtual
+  modules (`defineModule`/`sandboxImport`) are now served by an in-thread
+  `module.registerHooks` loader (`andbox-vfs://` URLs) instead of per-call
+  `data:` URLs, so they support relative imports (`./b`, `../c.js`), bare-name
+  imports, the sandbox `importMap`, cycles, and extensionless/`index.js`
+  lookup. Behaviour note: modules are cached per definition, so repeated
+  `sandboxImport(name)` returns the same instance until redefined.
+- **`createVirtualModuleRegistry()` works under Node.** Its URLs are now
+  importable (`andbox-vfs:` instead of un-importable `blob:`), with relative
+  imports between the files. New `source(path)` method and
+  `options.backend` (`'auto' | 'blob' | 'node'`); the browser path is
+  unchanged.
+- **Behaviour change (pre-1.0):** an unknown `mode` now throws
+  `Unknown sandbox mode '...'. Supported modes: ...` instead of silently
+  using worker mode. `mode: ''` also throws.
+- **Bundler coverage:** real browser-target smoke tests for webpack 5 and
+  Vite (devDependencies) alongside the existing esbuild test.
+- **Opt-in hardening: `nodeWorker`.** `nodeWorker.permissions: true` spawns
+  the thread with Node's permission model (`--permission`), an isolated `env`,
+  a default 256 MB heap cap, stripped `process` escapes (`binding`,
+  `getBuiltinModule`, `dlopen`, `kill`, ...), blocked `node:`/`file:` imports
+  and captured stdio. Also `env`, `maxMemoryMb`, `resourceLimits`, `execArgv`,
+  `captureStdio`. A thread that dies (e.g. out of memory) is replaced on the
+  next call. The README now states plainly that a worker thread is not a
+  security boundary and what the hardening does and does not prevent.
+- **`unref` option** (default `false`): lets the process exit while the
+  sandbox is idle. Without it a live sandbox keeps the process alive until
+  `dispose()` (confirmed and now tested).
+
 ## 0.0.5
 
 - The Node-mode `import('node:worker_threads')` now uses a non-literal

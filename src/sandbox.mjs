@@ -231,9 +231,7 @@ async function createServiceWorkerSandbox(options = {}) {
   const initialFiles = { ...files };
   if (registry) {
     for (const path of registry.paths()) {
-      const url = registry.resolve(path);
-      const res = await fetch(url);
-      initialFiles[path] = { body: await res.text(), contentType: guessContentType(path) };
+      initialFiles[path] = { body: registry.source(path), contentType: guessContentType(path) };
     }
   }
 
@@ -307,6 +305,8 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {(level: string, ...args: string[]) => void} [onConsole] - Console output handler
  */
 
+const SUPPORTED_MODES = ['worker', 'node-worker', 'inline', 'data-uri', 'service-worker'];
+
 /**
  * Create a new sandboxed runtime.
  *
@@ -314,7 +314,13 @@ async function createServiceWorkerSandbox(options = {}) {
  * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
  */
 export function createSandbox(options = {}) {
-  const mode = options.mode || 'worker';
+  const mode = options.mode ?? 'worker';
+  if (!SUPPORTED_MODES.includes(mode)) {
+    throw new Error(
+      `Unknown sandbox mode ${typeof mode === 'string' ? `'${mode}'` : String(mode)}. ` +
+      `Supported modes: ${SUPPORTED_MODES.map((m) => `'${m}'`).join(', ')}.`
+    );
+  }
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
   if (mode === 'service-worker') return createServiceWorkerSandbox(options);
@@ -329,14 +335,25 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     baseURL = typeof location !== 'undefined' ? location.href : 'https://andbox.local/',
     policy,
     onConsole,
+    nodeWorker,
+    unref = false,
   } = options;
 
   // Node mode: no global Worker (and no blob: worker URLs) -> node:worker_threads.
   // An explicit workerFactory always wins; 'node-worker' forces Node; the
   // default selects it only when there is no global Worker under Node.
   let workerFactory = options.workerFactory || null;
+  let usingNode = false;
   if (!workerFactory && (forceNode || (typeof Worker === 'undefined' && isNodeRuntime()))) {
-    workerFactory = await createNodeWorkerFactory();
+    workerFactory = await createNodeWorkerFactory(nodeWorker);
+    usingNode = true;
+  }
+  if (nodeWorker && !usingNode) {
+    // A security option that silently does nothing is worse than an error.
+    throw new Error(
+      'The nodeWorker option only applies to the built-in Node worker_threads mode; ' +
+      'it cannot be honoured with a browser Worker or a custom workerFactory.'
+    );
   }
 
   // Gate capabilities with rate limits
@@ -351,6 +368,17 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
   let worker = null;
   let workerBlobURL = null;
 
+  // `unref`: the thread only keeps the host process alive while work is in
+  // flight (startup, evaluate, defineModule); idle, it lets the process exit.
+  let activeOps = 0;
+  function beginOp() {
+    activeOps++;
+    worker?.ref?.();
+  }
+  function endOp() {
+    if (--activeOps === 0 && unref) worker?.unref?.();
+  }
+
   // Pending evaluations
   const pending = new Map(); // id -> { resolve, reject, timer }
 
@@ -361,6 +389,7 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     if (workerFactory) {
       worker = workerFactory(source);
       attachWorkerHandlers();
+      worker.onstdio = (stream, text) => activeConsoleHandler?.(stream, text);
       return;
     }
     const blob = new Blob([source], { type: 'application/javascript' });
@@ -471,9 +500,15 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
   }
 
   async function restartWorker() {
-    terminateWorker();
-    createWorker();
-    await configureWorker();
+    beginOp();
+    try {
+      terminateWorker();
+      createWorker();
+      worker.ref?.();
+      await configureWorker();
+    } finally {
+      endOp();
+    }
   }
 
   // ── Public API ──
@@ -487,7 +522,8 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
    */
   async function evaluate(code, opts = {}) {
     if (disposed) throw new Error('Sandbox is disposed');
-    if (!worker) await restartWorker();
+    if (!worker || worker.dead) await restartWorker();
+    beginOp();
 
     // Random (not sequential) id so code running during one evaluate() call
     // can't guess the id of a concurrent evaluate() on the same worker and
@@ -516,6 +552,7 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     if (opts.signal) {
       if (opts.signal.aborted) {
         if (timer) clearTimeout(timer);
+        endOp();
         throw makeAbortError();
       }
       opts.signal.addEventListener('abort', () => {
@@ -533,10 +570,10 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     worker.postMessage({ type: 'evaluate', id, code });
 
     // Restore console handler when evaluation completes
-    if (opts.onConsole) {
-      return promise.finally(() => { activeConsoleHandler = prevConsoleHandler; });
-    }
-    return promise;
+    return promise.finally(() => {
+      if (opts.onConsole) activeConsoleHandler = prevConsoleHandler;
+      endOp();
+    });
   }
 
   /**
@@ -551,6 +588,7 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     virtualModules.set(name, source);
 
     if (worker) {
+      beginOp();
       const { promise, resolve } = makeDeferred();
       const handler = ({ data }) => {
         if (data.type === 'moduleDefined' && data.name === name) {
@@ -560,7 +598,7 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
       };
       worker.addEventListener('message', handler);
       worker.postMessage({ type: 'defineModule', name, source });
-      await promise;
+      try { await promise; } finally { endOp(); }
     }
   }
 
@@ -594,8 +632,13 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
   }
 
   // ── Initialize ──
-  createWorker();
-  await configureWorker();
+  beginOp();
+  try {
+    createWorker();
+    await configureWorker();
+  } finally {
+    endOp();
+  }
 
   return {
     evaluate,

@@ -135,7 +135,11 @@ export declare function resolveWithImportMap(
 
 // ── virtual-module-registry ──
 
-/** A registry of in-memory files, each backed by its own `blob:` URL. */
+/**
+ * A registry of in-memory files: each backed by its own `blob:` URL in a
+ * browser, or an importable `andbox-vfs:` URL under Node (where files can
+ * import each other relatively).
+ */
 export interface VirtualModuleRegistry {
   /**
    * Get the `blob:` URL registered for a path.
@@ -165,6 +169,9 @@ export interface VirtualModuleRegistry {
    */
   define(path: string, source: string): string;
 
+  /** The source text registered for a path, or null. Works in every runtime. */
+  source(path: string): string | null;
+
   /** Whether a path is registered. */
   has(path: string): boolean;
 
@@ -188,7 +195,11 @@ export interface VirtualModuleRegistry {
  */
 export declare function createVirtualModuleRegistry(
   files?: Record<string, string>,
-  options?: { importMap?: ImportMap },
+  options?: {
+    importMap?: ImportMap;
+    /** `'auto'` (default): Node hooks under Node, `blob:` elsewhere. */
+    backend?: 'auto' | 'blob' | 'node';
+  },
 ): VirtualModuleRegistry;
 
 // ── network-policy ──
@@ -311,12 +322,52 @@ export interface SandboxOptions {
    * `Worker`. `'node-worker'` forces the Node implementation.
    */
   mode?: 'worker' | 'node-worker';
+  // Any other value throws: supported modes are 'worker', 'node-worker', 'inline', 'data-uri', 'service-worker'.
   /**
    * Supply the Worker implementation: given the worker script source, return
    * a Web-Worker-shaped object. Overrides automatic selection. See
    * `createNodeWorkerFactory()`.
    */
   workerFactory?: (source: string) => WorkerLike;
+  /**
+   * Node worker_threads options and opt-in hardening. Only valid with the
+   * built-in Node mode (throws with a browser Worker or custom workerFactory).
+   * A worker thread is NOT a security boundary even with `permissions: true`.
+   */
+  nodeWorker?: NodeWorkerOptions;
+  /**
+   * Node only (default false). When true the thread is unref'd while the
+   * sandbox is idle so a forgotten sandbox does not keep the process alive;
+   * it stays ref'd during startup, evaluate() and defineModule(). Without it
+   * a live sandbox keeps the process alive until dispose().
+   */
+  unref?: boolean;
+}
+
+/** Options for the built-in Node worker_threads mode (`nodeWorker`). */
+export interface NodeWorkerOptions {
+  /**
+   * Spawn the thread with Node's permission model (`--permission`), an
+   * isolated `env` (`{}` unless `env` is given), a default 256 MB heap cap,
+   * stripped `process` escapes, blocked `node:`/`file:` imports and captured
+   * stdio. Does not restrict network or CPU.
+   */
+  permissions?: boolean;
+  /** Environment for the thread. Default: a copy of `process.env` (or `{}` with `permissions`). */
+  env?: Record<string, string>;
+  /** Heap cap in megabytes (`resourceLimits.maxOldGenerationSizeMb`). */
+  maxMemoryMb?: number;
+  /** Raw `worker_threads` resourceLimits, merged over `maxMemoryMb`. */
+  resourceLimits?: {
+    maxOldGenerationSizeMb?: number;
+    maxYoungGenerationSizeMb?: number;
+    codeRangeSizeMb?: number;
+    stackSizeMb?: number;
+  };
+  /** Extra thread `execArgv`, e.g. `['--allow-fs-read=/data']`. */
+  execArgv?: string[];
+  /** Route thread stdout/stderr to `onConsole('stdout' | 'stderr', text)`. Default: true with `permissions`. */
+  captureStdio?: boolean;
 }
 
 /** The subset of the Web Worker interface andbox drives. */
@@ -333,7 +384,9 @@ export interface WorkerLike {
  * Node only: load `node:worker_threads` and return a synchronous factory that
  * runs andbox's worker source in a thread. Suitable for `workerFactory`.
  */
-export declare function createNodeWorkerFactory(): Promise<(source: string) => WorkerLike>;
+export declare function createNodeWorkerFactory(
+  options?: NodeWorkerOptions,
+): Promise<(source: string) => WorkerLike>;
 
 /** Sandbox statistics. */
 export interface SandboxStats {

@@ -33,6 +33,10 @@ export function makeWorkerSource() {
 let importMap = { imports: {}, scopes: {} };
 let baseURL = 'https://andbox.local/';
 const virtualModules = new Map();
+// Node mode only: the adapter provides a loader that lets virtual modules
+// import each other. Captured once and removed from the global scope.
+const nodeVirtual = globalThis.__andboxNodeVirtual;
+try { delete globalThis.__andboxNodeVirtual; } catch {}
 
 // ── Import Map Resolver (inlined) ──
 function resolveWithImportMap(specifier, map, parentURL) {
@@ -69,6 +73,7 @@ function matchSpec(specifier, mapping) {
 async function sandboxImport(specifier) {
   // 1. Virtual module
   if (virtualModules.has(specifier)) {
+    if (nodeVirtual) return await nodeVirtual(specifier, virtualModules, importMap);
     const src = virtualModules.get(specifier);
     const blob = new Blob([src], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);

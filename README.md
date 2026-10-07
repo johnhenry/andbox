@@ -85,7 +85,7 @@ await sandbox.dispose();
 
 ## Sandbox Modes
 
-andbox supports five execution modes:
+andbox supports five execution modes (any other `mode` throws an error listing these):
 
 - **`worker`** (default) -- Runs in a dedicated Worker with an RPC bridge, import maps, virtual modules, and hard-kill timeout semantics. See [Security model](#security-model) for what this does and doesn't protect against.
 - **`node-worker`** -- The `worker` mode on `node:worker_threads`. Selected automatically under Node when there is no global `Worker`; see [Node](#node).
@@ -125,13 +125,42 @@ await sandbox.dispose(); // worker threads keep the process alive until disposed
 
 **Mode selection.** `mode: 'worker'` (the default) picks `node:worker_threads` when `typeof Worker === 'undefined'` and the runtime is Node; if a global `Worker` exists (browser, or a shim you installed) that is used as before. `mode: 'node-worker'` forces the Node implementation. `workerFactory: (source) => WorkerLike` overrides both; `createNodeWorkerFactory()` is exported for that purpose.
 
-**How it works.** The same worker script the browser uses is passed to `new worker_threads.Worker(prelude + source, { eval: true })`. No blob URLs are created. The prelude maps `parentPort` to `self.postMessage`/`onmessage`/`close`, and makes the worker's virtual-module loader mint `data:` URLs (Node cannot `import()` a `blob:` URL). `node:worker_threads` is loaded with a dynamic `import()` so browser bundles never see a `node:` specifier. Timeouts, `AbortSignal`, and `dispose()` hard-kill the thread with `terminate()` and a fresh one is started on the next call.
+**How it works.** The same worker script the browser uses is passed to `new worker_threads.Worker(prelude + source, { eval: true })`. No blob URLs are created. The prelude maps `parentPort` to `self.postMessage`/`onmessage`/`close` and installs an in-thread module loader hook (`module.registerHooks`) that serves virtual modules from memory (see below). `node:worker_threads` is loaded with a dynamic `import()` so browser bundles never see a `node:` specifier. Timeouts, `AbortSignal`, and `dispose()` hard-kill the thread with `terminate()` and a fresh one is started on the next call.
+
+**Virtual modules can import each other (0.0.6).** `defineModule()` modules are served under `andbox-vfs://` URLs, so they can import one another relatively (`./b`, `../lib/c.js`), by bare name (`import x from "lib/x"`), through the sandbox `importMap`, and cyclically. Extensions are optional (`./b`, `./b.js`, `./b/index.js` all find `b`). Redefining a module (or a dependency) takes effect on the next `sandboxImport()`. Difference from the browser: modules are cached per definition, so repeated `sandboxImport(name)` returns the same module instance until it is redefined. `createVirtualModuleRegistry()` uses the same mechanism under Node (see its section).
+
+**Process lifetime.** A live worker thread keeps the host process alive until `dispose()` (confirmed by test: no `dispose()` and the process never exits; after `dispose()` it exits). Pass `unref: true` to let the process exit while the sandbox is *idle*: the thread is unref'd between calls and ref'd again while a startup, `evaluate()` or `defineModule()` is in flight, so an `await sandbox.evaluate(...)` is never abandoned. Default `false`. (Ignored with a browser Worker.)
+
+**Hardening (opt-in): `nodeWorker`.** By default the thread behaves like any `worker_threads` thread: it gets a copy of `process.env`, no memory cap, and full access to `process`, `fs`, `child_process`, etc. These options tighten that:
+
+```js
+const sandbox = await createSandbox({
+  nodeWorker: {
+    permissions: true,        // see below
+    // env: { MODE: 'x' },    // explicit env; with permissions the default is {}
+    // maxMemoryMb: 128,      // heap cap (default 256 with permissions: true)
+    // resourceLimits: {...}, // raw worker_threads resourceLimits, merged on top
+    // execArgv: [...],       // extra thread flags, e.g. '--allow-fs-read=/data'
+    // captureStdio: true,    // route thread stdout/stderr to onConsole('stdout'|'stderr', text)
+  },
+});
+```
+
+`permissions: true` does all of the following to the thread:
+
+- **Permission model.** Spawns it with `execArgv: ['--permission']` (this works per-thread in Node 26 even though the flag is documented process-wide). Verified by test: `fs` reads and `child_process` are denied with `ERR_ACCESS_DENIED`, Nested workers and native addons are not granted (`--allow-worker` / `--allow-addons` are not passed), though only the `fs` and `child_process` denials are covered by tests. Grant specific paths with `execArgv: ['--allow-fs-read=/dir']`.
+- **Isolated `env`.** `{}` (or the object you pass) instead of a copy of the host's environment, so secrets in `process.env` are not visible.
+- **Memory cap.** `resourceLimits.maxOldGenerationSizeMb` (default 256, or `maxMemoryMb`). An allocation loop kills the thread with an out-of-memory error, the pending `evaluate()` rejects, and the next call starts a fresh thread. (andbox has no other memory-limit option, so `maxMemoryMb` is new here; `policy.limits` only governs capability calls.)
+- **Stripped `process`.** Deletes `process.binding`, `_linkedBinding`, `getBuiltinModule`, `dlopen`, `kill`, `abort`, `reallyExit`, `mainModule`.
+- **Blocked host imports.** A resolve hook rejects any `import()` / `sandboxImport()` that resolves to a `node:` or `file:` URL (`import('node:fs')`, `import('fs')`, `import('file:///...')`). `data:`, `http(s):` and virtual modules still work.
+- **Captured stdio.** Thread `process.stdout/stderr` writes go to `onConsole` instead of the host terminal.
+
+**What this does *not* prevent.** The thread is still in your process. `permissions` does not restrict the network (`fetch`, `WebSocket`, `net` via any route that remains), CPU use (use `timeoutMs`), or anything that exploits a bug in V8 or Node; the `process` stripping and import hook are denylists, not a proof, and a determined attacker may find another path to a host capability. It only reduces the blast radius of ordinary and semi-hostile code. See [Security model](#security-model). The options throw if combined with a browser Worker or a custom `workerFactory`, rather than silently doing nothing.
 
 **Not supported / differences.**
 
 - `mode: 'service-worker'` needs a browser and rejects under Node.
-- Virtual modules are `data:` modules, so they cannot use *relative* imports of each other; use import maps or `sandboxImport()`. `createVirtualModuleRegistry()` still works as a path table in Node, but its `blob:` URLs cannot be `import()`ed there.
-- A worker thread is not a security boundary: it shares the process, and sandboxed code can reach `process` and `require`. Treat it like the browser Worker mode, which also is not a defense against hostile code (see [Security model](#security-model)); for untrusted code on a server add OS-level isolation.
+- **A worker thread is not a security boundary** -- not by default and not with `nodeWorker.permissions`. By default sandboxed code can reach `process` (including `process.env`, `process.binding`, `process.getBuiltinModule('fs')`) and can `import('node:child_process')`. For untrusted code on a server add OS-level isolation (a separate process or container with its own filesystem, network and resource limits).
 
 ## API
 
@@ -204,7 +233,7 @@ Resolves a module specifier against an import map, following the browser import 
 
 ### `createVirtualModuleRegistry(files?, options?)`
 
-Takes a `path → source` map and mints one real `blob:` URL per entry (the same `new Blob([...]) + URL.createObjectURL()` pattern `data-uri` mode uses, generalized to a whole file table). Returns a registry for a multi-file tree that references itself by relative path -- an entry module `import`-ing `./util.js`, which itself imports `../shared/x.js`, and so on.
+Takes a `path → source` map and mints one importable URL per entry: a real `blob:` URL in a browser (the same `new Blob([...]) + URL.createObjectURL()` pattern `data-uri` mode uses, generalized to a whole file table), or, under Node (which cannot `import()` a `blob:` URL), an `andbox-vfs://<id>/<path>?v=<n>` URL served by an in-thread module hook. `options.backend` is `'auto'` (default), `'blob'` or `'node'`. Returns a registry for a multi-file tree that references itself by relative path -- an entry module `import`-ing `./util.js`, which itself imports `../shared/x.js`, and so on.
 
 ```js
 import { createVirtualModuleRegistry } from '@johnhenry/andbox';
@@ -214,15 +243,18 @@ const registry = createVirtualModuleRegistry({
   'util.js': 'export function add(a, b) { return a + b; }',
 });
 
-registry.resolve('index.js');                       // blob: URL, or null if unknown
+registry.resolve('index.js');                       // importable URL, or null if unknown
+registry.source('index.js');                        // the registered source text
 registry.resolveSpecifier('./util.js', 'index.js');  // resolves relative to the importing file
 registry.define('extra.js', 'export const x = 1;');  // register (or replace) a file at runtime
-registry.dispose();                                  // revokes every blob URL it ever minted
+registry.dispose();                                  // revokes blob URLs / drops the Node files
 ```
 
 `resolveSpecifier(specifier, parentPath?)` checks, in order: (1) import-map resolution via `resolveWithImportMap()` -- not reimplemented, just delegated, with `parentPath`'s own blob URL passed through as `parentURL` so `scopes` apply; (2) a relative-path (`./`, `../`) fallback looked up against the registry's own file table, which `resolveWithImportMap()` alone has no notion of; (3) `null` if neither matched, e.g. a genuine external bare specifier -- left for the caller to handle, not swallowed.
 
-**Honest caveat:** this only solves module *resolution* (the URL a given specifier should point at), not automatic rewriting of `import` statements inside the source text, and not general asset URLs (`<img src>`, CSS `url()`) or navigation. A `blob:` URL has no hierarchical path of its own, so a literal `import "./util.js"` statement inside blob-served source will **not** resolve on its own in a browser -- call `resolveSpecifier()` yourself with the specifier your loader saw and use the URL it returns (or rewrite the specifier to that URL before creating the blob). See [andbox#13](https://github.com/johnhenry/andbox/issues/13) for the full design discussion, and [andbox#14](https://github.com/johnhenry/andbox/issues/14) for the harder "make it behave like a real server" problem this deliberately does not attempt to solve.
+**Under Node, relative imports just work.** `await import(registry.resolve('index.js'))` runs `index.js`, whose `./util.js` import is resolved by the hook (relative, bare-name, import map, cycles, and extensionless/`index.js` lookups). Redefine a file with `define()` and import the new URL it returns.
+
+**Honest caveat (browser / `blob:` backend):** this only solves module *resolution* (the URL a given specifier should point at), not automatic rewriting of `import` statements inside the source text, and not general asset URLs (`<img src>`, CSS `url()`) or navigation. A `blob:` URL has no hierarchical path of its own, so a literal `import "./util.js"` statement inside blob-served source will **not** resolve on its own in a browser -- call `resolveSpecifier()` yourself with the specifier your loader saw and use the URL it returns (or rewrite the specifier to that URL before creating the blob). See [andbox#13](https://github.com/johnhenry/andbox/issues/13) for the full design discussion, and [andbox#14](https://github.com/johnhenry/andbox/issues/14) for the harder "make it behave like a real server" problem this deliberately does not attempt to solve.
 
 ### `createNetworkFetch(allowedHosts?, fetchFn?)`
 
@@ -311,6 +343,7 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 
 - **No DOM access.** Worker-mode code executes in a real Worker global scope, which has no `document`, `window`, or other DOM references -- this is a platform property of Workers, not something andbox has to enforce itself.
 - **No implicit host object references.** Only what you explicitly pass in (`capabilities`, `globals`, import map entries) is reachable from sandboxed code -- ordinary (non-adversarial) code cannot accidentally read or mutate host-side state it wasn't given a reference to.
+- **(Node) A worker thread is not a security boundary.** It shares the process with the host; by default it inherits `process.env` and can reach `process`, `fs`, and `child_process`. The opt-in `nodeWorker.permissions` hardening (see [Node](#node)) adds the permission model, an isolated env, a memory cap and import blocking, which raises the cost of casual abuse but does not make the thread a boundary.
 - **Hard kill on timeout.** `evaluate()` calls that exceed `timeoutMs` `terminate()` the Worker outright and start a fresh one for the next call -- this is a real process-level kill, not a cooperative cancellation the running code could ignore. See "still yours" below for what a kill does *not* undo.
 - **The capability gate cannot be walked around via the prototype chain.** `gateCapabilities()` builds the gated object with `Object.create(null)`, so `host.call('constructor', ...)` cannot resolve through `Object.prototype` to the real global `Object` constructor. Previously fixed; see [andbox#5](https://github.com/johnhenry/andbox/issues/5).
 - **`createNetworkFetch()`'s allowlist is redirect-safe.** Requests are made with `redirect: 'manual'` and any redirect response is rejected outright, so an allowlisted host cannot silently redirect a caller to a non-allowlisted one. Previously fixed; see [andbox#6](https://github.com/johnhenry/andbox/issues/6).

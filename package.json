@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/andbox",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "description": "Sandboxed JavaScript runtime with Worker isolation, RPC, import maps, and timeouts",
   "main": "./src/index.mjs",
@@ -43,6 +43,8 @@
     "node": ">=26.0.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "vite": "^8.3.3",
+    "webpack": "^5.111.1"
   }
 }
