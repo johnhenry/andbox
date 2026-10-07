@@ -300,6 +300,14 @@ export interface EvaluateOptions {
   signal?: AbortSignal;
   /** Console output handler for this evaluation (overrides sandbox-level handler). */
   onConsole?: (level: string, ...args: string[]) => void;
+  /** `mode: 'wasm'` only: fuel for this call (overrides the sandbox option). */
+  fuel?: number;
+  /** `mode: 'wasm'` only: JS heap cap in bytes for this call. */
+  memoryBytes?: number;
+  /** `mode: 'wasm'` only: guest stack cap in bytes for this call. */
+  stackBytes?: number;
+  /** `mode: 'wasm'` only: cooperative wall-clock deadline for this call (default: `timeoutMs`). */
+  deadlineMs?: number;
 }
 
 /** Options for createSandbox(). */
@@ -321,8 +329,44 @@ export interface SandboxOptions {
    * `node:worker_threads` automatically when run under Node with no global
    * `Worker`. `'node-worker'` forces the Node implementation.
    */
-  mode?: 'worker' | 'node-worker';
-  // Any other value throws: supported modes are 'worker', 'node-worker', 'inline', 'data-uri', 'service-worker'.
+  mode?: 'worker' | 'node-worker' | 'wasm';
+  // Any other value throws: supported modes are 'worker', 'node-worker', 'wasm', 'inline', 'data-uri', 'service-worker'.
+  /**
+   * `mode: 'wasm'` only. URL of an ES module built from
+   * `@johnhenry/andbox/wasm-engine` (the QuickJS engine entry), served from
+   * your own origin. Optional under Node (the installed optional packages
+   * are used); required in a browser. May also be given as the import map
+   * entry `@johnhenry/andbox/wasm-engine`.
+   */
+  engineURL?: string;
+  /**
+   * `mode: 'wasm'` only. URL of the QuickJS `.wasm` file (from
+   * `@jitl/quickjs-ng-wasmfile-release-sync`), served from your own origin.
+   * May also be given as the import map entry `@johnhenry/andbox/wasm`.
+   */
+  wasmURL?: string;
+  /**
+   * `mode: 'wasm'` only. Fuel budget: the number of interrupt-handler polls
+   * (one roughly every 10,000 VM operations) the code may use before it is
+   * stopped with a `FuelExhaustedError`. Deterministic for the same code.
+   * Default 0 (unlimited; the deadline still applies).
+   */
+  fuel?: number;
+  /**
+   * `mode: 'wasm'` only. Cap in bytes on the guest's JS heap, plus a hard cap
+   * of about `2 * memoryBytes + 32 MiB` on the engine's total linear memory.
+   * Default 64 MiB. 0 disables the soft cap and uses the 2 GiB engine maximum.
+   */
+  memoryBytes?: number;
+  /** `mode: 'wasm'` only. Guest call-stack cap in bytes. Default 128 KiB (raising it far enough overflows the host stack; that is caught and reported as an EngineError). */
+  stackBytes?: number;
+  /**
+   * `mode: 'wasm'` only. Cooperative wall-clock deadline in ms for each
+   * `evaluate()`; exceeding it rejects with `TimeoutError` and the Worker
+   * survives. Default: the call's `timeoutMs`. `timeoutMs` then acts as the
+   * hard-kill backstop (`terminate()`) a little later.
+   */
+  deadlineMs?: number;
   /**
    * Supply the Worker implementation: given the worker script source, return
    * a Web-Worker-shaped object. Overrides automatic selection. See
@@ -394,7 +438,28 @@ export interface SandboxStats {
   pendingEvaluations: number;
   virtualModules: string[];
   gate: GateStatsResult;
+  /** `mode: 'wasm'` only: interrupt polls used by the most recent evaluate(). */
+  fuelUsed?: number;
+  /** `mode: 'wasm'` only: peak sampled JS heap bytes seen so far. */
+  peakMemoryBytes?: number;
+  /** `mode: 'wasm'` only: interrupt polls used across all evaluate() calls. */
+  totalFuelUsed?: number;
 }
+
+/**
+ * `mode: 'wasm'` failure codes, set as `error.code` (and `error.name` is the
+ * key): fuel ran out, the heap cap was hit, the deadline passed, or the
+ * engine could not be loaded / faulted.
+ */
+export declare const WASM_ERROR_CODES: Readonly<{
+  FuelExhaustedError: 'ERR_ANDBOX_FUEL_EXHAUSTED';
+  MemoryLimitError: 'ERR_ANDBOX_MEMORY_LIMIT';
+  TimeoutError: 'ERR_ANDBOX_DEADLINE';
+  EngineError: 'ERR_ANDBOX_ENGINE';
+}>;
+
+/** The Worker script for `mode: 'wasm'`, as a string. */
+export declare function makeWasmWorkerSource(): string;
 
 /** A sandboxed JavaScript runtime instance. */
 export interface Sandbox {

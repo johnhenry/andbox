@@ -10,12 +10,14 @@ Runnable, self-verifying examples. Each one asserts the behavior it demonstrates
 | [`04-runaway-code-gets-timed-out.mjs`](./04-runaway-code-gets-timed-out.mjs) | Code that never finishes is cut off by the execution timeout with a clean error; the host and sandbox remain usable. |
 | [`05-virtual-module-registry-resolves-a-multi-file-tree.mjs`](./05-virtual-module-registry-resolves-a-multi-file-tree.mjs) | `createVirtualModuleRegistry()` mints a real `blob:` URL per file and resolves specifiers across a multi-file tree — import-map matches first, then a relative-path (`./`, `../`) fallback against the known file table, then `null` for anything genuinely external. |
 | [`06-service-worker-mode/`](./06-service-worker-mode/) | `createSandbox({ mode: 'service-worker' })` registers a Service Worker backed by an in-memory `path → content` map; an iframe navigates into its scope with real HTTP-shaped semantics — no `blob:` URL, no content rewriting. **Not** part of `npm run examples` — see below. |
+| [`07-wasm-mode-contains-hostile-code.mjs`](./07-wasm-mode-contains-hostile-code.mjs) | `createSandbox({ mode: 'wasm' })` runs code in QuickJS compiled to WebAssembly: no `fetch`/`process`/Worker globals, `host.call` as the only authority, deterministic fuel, a memory cap and a deadline, each with its own error code. Needs the optional engine packages (devDependencies here). |
+| [`08-wasm-browser/`](./08-wasm-browser/) | The same wasm mode in a real browser Worker, booted from same-origin engine assets (no CDN): `build.mjs` produces them, `serve.mjs` serves them, `run-headless.mjs` drives headless Chrome through the checks (`npm run example:08:headless`). **Not** part of `npm run examples` — it needs a browser. |
 
 ## Running
 
 ```sh
-npm run examples      # run all in sequence (01-05 only -- see the note on 06 below)
-npm run example:01    # run one (also :02, :03, :04, :05)
+npm run examples      # run all in sequence (01-05 and 07 -- see the notes on 06 and 08 below)
+npm run example:01    # run one (also :02, :03, :04, :05, :07)
 # or directly:
 node examples/01-untrusted-code-runs-isolated.mjs
 ```

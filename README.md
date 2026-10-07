@@ -19,9 +19,12 @@ Zero dependencies. Uses only Web Workers and standard browser APIs.
 - [Install](#install)
 - [Quick Start](#quick-start)
 - [Sandbox Modes](#sandbox-modes)
+- [Node](#node)
+- [`mode: 'wasm'`](#mode-wasm)
 - [API](#api)
 - [Execution model](#execution-model)
 - [Security model](#security-model)
+- [Threat model by mode](#threat-model-by-mode)
 - [Family](#family)
 - [License](#license)
 
@@ -85,10 +88,11 @@ await sandbox.dispose();
 
 ## Sandbox Modes
 
-andbox supports five execution modes (any other `mode` throws an error listing these):
+andbox supports six execution modes (any other `mode` throws an error listing these):
 
 - **`worker`** (default) -- Runs in a dedicated Worker with an RPC bridge, import maps, virtual modules, and hard-kill timeout semantics. See [Security model](#security-model) for what this does and doesn't protect against.
 - **`node-worker`** -- The `worker` mode on `node:worker_threads`. Selected automatically under Node when there is no global `Worker`; see [Node](#node).
+- **`wasm`** -- Optional. Runs the code in QuickJS-ng compiled to WebAssembly *inside* the Worker (or worker thread), with `host.call` as the only authority and real memory, stack, fuel and deadline limits. The only mode that withholds the Worker's own globals (`fetch`, `WebSocket`, `importScripts`, ...). See [`mode: 'wasm'`](#mode-wasm).
 - **`inline`** -- Same-thread execution via AsyncFunction. Lighter weight, no Worker overhead, no isolation at all -- code runs with full access to the calling context. Only for code you already trust.
 - **`data-uri`** -- Dynamic `import()` via Blob URL (a `data:` URL under Node). Module-level separation without a Worker. Supports globals injection.
 - **`service-worker`** -- Not code execution at all: registers a Service Worker that serves an in-memory `path → content` map with real HTTP-shaped fetch/navigation semantics. For hosting a small virtual multi-file site (HTML/CSS/JS, arbitrary paths), not for running JS in isolation. See [andbox#14](https://github.com/johnhenry/andbox/issues/14) and [Security model](#security-model) -- this mode does **not** provide isolation by merely existing.
@@ -162,6 +166,82 @@ const sandbox = await createSandbox({
 - `mode: 'service-worker'` needs a browser and rejects under Node.
 - **A worker thread is not a security boundary** -- not by default and not with `nodeWorker.permissions`. By default sandboxed code can reach `process` (including `process.env`, `process.binding`, `process.getBuiltinModule('fs')`) and can `import('node:child_process')`. For untrusted code on a server add OS-level isolation (a separate process or container with its own filesystem, network and resource limits).
 
+## `mode: 'wasm'`
+
+`mode: 'wasm'` (added in 0.0.8, [andbox#21](https://github.com/johnhenry/andbox/issues/21)) is the "different execution strategy" the [Security model](#security-model) says `worker` mode is missing. The code you `evaluate()` is not run by the Worker's JavaScript engine at all: it runs in [QuickJS-ng](https://github.com/quickjs-ng/quickjs) compiled to WebAssembly, in the same Worker (browser) or `worker_thread` (Node) andbox already uses. A fresh QuickJS runtime and context is created for every `evaluate()`.
+
+The engine has no `fetch`, `WebSocket`, `XMLHttpRequest`, `importScripts`, `indexedDB`, `postMessage`, `self`, `Worker`, timers or `process`: they are not hidden, they simply do not exist in that engine. Its only way out is the single native function behind `host.call(name, ...args)`, which goes through the same `capabilityCall` message, `gateCapabilities()` and `policy` as worker mode. `sandboxImport()` and `import()` resolve **only** virtual modules (`defineModule()`); no URL is ever fetched.
+
+```js
+import { createSandbox } from '@johnhenry/andbox';
+
+const sandbox = await createSandbox({
+  mode: 'wasm',
+  capabilities: { readFile: async (path) => { /* host side */ } },
+  fuel: 50_000,              // interrupt polls, deterministic (default: unlimited)
+  memoryBytes: 32 * 1024 * 1024, // JS heap cap (default 64 MiB)
+  stackBytes: 128 * 1024,    // guest stack cap (default 128 KiB)
+  deadlineMs: 2_000,         // cooperative wall-clock deadline (default: the call's timeoutMs)
+});
+
+await sandbox.evaluate('return await host.call("readFile", "/etc/hostname")');
+```
+
+### Installing the engine (optional, pinned)
+
+The engine is an **optional** peer dependency, pinned to exact versions, so the default install stays dependency-free:
+
+```sh
+npm install --save-exact quickjs-emscripten-core@0.32.0 @jitl/quickjs-ng-wasmfile-release-sync@0.32.0
+```
+
+Without them `createSandbox({ mode: 'wasm' })` rejects with `ERR_ANDBOX_ENGINE_MISSING` and the install command above. Every other mode is unaffected.
+
+**Node:** nothing else to do. andbox finds the installed packages and the `.wasm` file itself.
+
+**Browser, no CDN:** the Worker needs two files from your own origin: the engine as one ES module, and the `.wasm` file. Build them once:
+
+```sh
+npx esbuild node_modules/@johnhenry/andbox/src/wasm-engine.mjs \
+  --bundle --format=esm --platform=browser --minify --outfile=public/andbox-quickjs.mjs
+cp node_modules/@jitl/quickjs-ng-wasmfile-release-sync/dist/emscripten-module.wasm public/andbox-quickjs.wasm
+```
+
+and point andbox at them (relative URLs resolve against `baseURL`, which defaults to the page URL):
+
+```js
+const sandbox = await createSandbox({
+  mode: 'wasm',
+  engineURL: '/andbox-quickjs.mjs',
+  wasmURL: '/andbox-quickjs.wasm',
+});
+```
+
+Or give them through the sandbox import map, so a page that already has one needs no new option: `importMap: { imports: { '@johnhenry/andbox/wasm-engine': '/andbox-quickjs.mjs', '@johnhenry/andbox/wasm': '/andbox-quickjs.wasm' } }`. Serve the `.wasm` as `application/wasm`. Size: about 54 KB for the engine module (15 KB gzipped) plus 528 KB for the `.wasm` (248 KB gzipped); the main `andbox` entry grows by about 10 KB minified (4 KB gzipped) for the extra worker source. `examples/08-wasm-browser/` is a complete working build + server + headless-Chrome check.
+
+### Limits
+
+| Option (sandbox or per `evaluate()` call) | What it does | Reported as |
+|---|---|---|
+| `fuel` | Budget of interrupt-handler polls (QuickJS polls about once per 10,000 VM operations). Counted, not timed, so the same code stops at the same count on every run. `sandbox.stats().fuelUsed` shows the last call's count. Guest code cannot catch it. | `FuelExhaustedError`, `code: 'ERR_ANDBOX_FUEL_EXHAUSTED'` |
+| `memoryBytes` | Cap on the guest JS heap (checked while the code runs, on a time budget of roughly 10% overhead) plus QuickJS's own limit, which rejects any single allocation above it. The engine's whole linear memory also gets a hard maximum of about `2 * memoryBytes + 32 MiB`, which is what actually bounds `ArrayBuffer` and similar allocations. | `MemoryLimitError`, `code: 'ERR_ANDBOX_MEMORY_LIMIT'` |
+| `stackBytes` | QuickJS call-stack cap. Overflow is an ordinary, catchable guest `RangeError`. | `RangeError` |
+| `deadlineMs` | Wall-clock deadline for the whole call, including time spent awaiting host calls. Checked in the interrupt handler and by a timer. The Worker survives; no respawn. Defaults to the call's `timeoutMs`. | `TimeoutError`, `code: 'ERR_ANDBOX_DEADLINE'` |
+| `timeoutMs` | Unchanged, but in this mode it is the **backstop**: the host `terminate()`s the Worker `max(timeoutMs, deadlineMs) + 1000 ms` after the call starts, which covers anything that stops the engine from polling. `AbortSignal` still terminates and restarts the Worker. | `TimeoutError` / `AbortError` |
+
+`stats()` additionally returns `fuelUsed`, `peakMemoryBytes` (sampled) and `totalFuelUsed`. The error classes are plain `Error`s with the `name` and `code` shown; `WASM_ERROR_CODES` exports the codes. An exception that escapes the engine itself (for example the host stack overflowing when `stackBytes` is set far above the default) is caught and reported as `EngineError` / `ERR_ANDBOX_ENGINE`; the engine is reloaded for the next call.
+
+### Differences from worker mode
+
+- `host.call` arguments and results, and the value you `return`, are JSON-serialised (worker mode uses structured clone). `undefined`, functions (`'[Function]'`) and `BigInt` (as a string) are handled as in worker mode; `Map`, `Set`, `Date` and typed arrays are not preserved.
+- Each `evaluate()` starts from a fresh global scope. Nothing set on `globalThis` survives; use `defineModule()` or the host for shared state.
+- `sandboxImport()` is limited to virtual modules (relative imports, bare names and import-map names that point at a virtual module name all work). An import map entry that points at a URL does not make that URL loadable.
+- Capability arguments are JSON, so a capability that expects non-JSON values will not get them.
+- Concurrent `evaluate()` calls on one sandbox share the Worker's single thread: a busy loop in one delays the others (their deadlines are wall-clock). Use one sandbox per tenant if that matters.
+- `nodeWorker.permissions` is rejected with this mode for now (the Worker has to read the engine from disk). The other `nodeWorker` options work.
+- A guest can catch the engine's out-of-memory error and keep running inside the cap; it cannot exceed the cap.
+- `Date`, `Math.random` and `performance` exist in the guest (QuickJS provides them from the host clock); see the threat model.
+
 ## API
 
 ### `createSandbox(options?)`
@@ -172,7 +252,7 @@ Creates a new sandboxed runtime. Returns a promise (Worker mode) or object (inli
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `mode` | `'worker' \| 'inline' \| 'data-uri'` | `'worker'` | Execution mode |
+| `mode` | `'worker' \| 'node-worker' \| 'wasm' \| 'inline' \| 'data-uri'` | `'worker'` | Execution mode |
 | `importMap` | `{ imports?, scopes? }` | `{}` | Import map for package resolution (Worker mode) |
 | `capabilities` | `Record<string, Function>` | `{}` | Host functions callable via `host.call()` (Worker mode) |
 | `defaultTimeoutMs` | `number` | `30000` | Default timeout for `evaluate()` |
@@ -180,6 +260,8 @@ Creates a new sandboxed runtime. Returns a promise (Worker mode) or object (inli
 | `policy` | `GatePolicy` | -- | Rate limiting policy |
 | `onConsole` | `(level, ...args) => void` | -- | Console output handler |
 | `globals` | `Record<string, any>` | `{}` | Global variables (inline/data-uri modes) |
+| `engineURL`, `wasmURL` | `string` | -- | `mode: 'wasm'`: same-origin URLs of the bundled engine module and the `.wasm` (optional under Node) |
+| `fuel`, `memoryBytes`, `stackBytes`, `deadlineMs` | `number` | see [Limits](#limits) | `mode: 'wasm'` limits (also accepted per `evaluate()` call) |
 
 **Returns (Worker mode):** `Promise<{ evaluate, defineModule, dispose, stats, isDisposed }>`
 
@@ -351,13 +433,40 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 
 **What is still yours:**
 
-- **Worker-global APIs are directly reachable, regardless of `capabilities`.** Sandboxed code executes in a real Worker global scope, so `fetch`, `WebSocket`, `Worker` (nested workers), `importScripts`, `indexedDB`, and `self.postMessage` are all callable directly -- omitting a `fetch` capability does not block network access. This is fundamental to how `Function`-based evaluation works and isn't fixable without a different execution strategy (e.g. a cross-origin iframe with a strict CSP, or a Realms/Compartments-based approach). See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
+- **Worker-global APIs are directly reachable, regardless of `capabilities`.** Sandboxed code executes in a real Worker global scope, so `fetch`, `WebSocket`, `Worker` (nested workers), `importScripts`, `indexedDB`, and `self.postMessage` are all callable directly -- omitting a `fetch` capability does not block network access. This is fundamental to how `Function`-based evaluation works and isn't fixable without a different execution strategy: [`mode: 'wasm'`](#mode-wasm) is that strategy (QuickJS in WebAssembly, no ambient authority), and a cross-origin iframe with a strict CSP is another. See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
 - **`sandboxImport()` will load and execute an arbitrary remote URL.** Any `http(s)://` specifier is passed straight to `import()` with no allowlist, independent of any network policy configured for capabilities. See [andbox#7](https://github.com/johnhenry/andbox/issues/7).
 - **A timeout stops message delivery, not in-flight host-side effects.** If a capability call with a real side effect (a write, an API call) is in flight when the timeout fires, that side effect still completes on the host even though the Worker is killed. Capabilities with real side effects should be designed to be idempotent and/or cancellable via `AbortSignal`. See [andbox#8](https://github.com/johnhenry/andbox/issues/8).
 - **`mode: 'service-worker'` does not provide isolation by merely existing.** It's a hosting mechanism -- a real Service Worker, same-origin by default, serving your `files` map with real fetch/navigation interception. Content served through it can see and touch its own origin exactly like any other same-origin page can; nothing about registering a Service Worker sandboxes what runs inside the pages it serves. If you're hosting content you don't fully trust, point this mode at a genuinely separate origin from day one -- the same recommendation the `fetch`/`WebSocket`/`Worker` item above makes for `worker` mode (a cross-origin iframe with a strict CSP), not something bolted on after the fact. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 - **The Service Worker does not control the very first navigation into its scope.** A page/iframe navigation into `scope` that happens *before* the registration has finished activating is a normal, unintercepted network request -- Service Workers never retroactively intercept a request that already went out. `createSandbox({ mode: 'service-worker' })`'s returned promise only resolves once the registration is active (its generated script also calls `clients.claim()` on activate, which helps *already-open* clients but not fresh navigations); the documented, load-bearing contract is: don't navigate anything into `scope` until that promise resolves. Do that and every request is intercepted from the first byte, because the registration already matches `scope` before the navigation request is made. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 
 If you need to run untrusted/adversarial code safely, andbox alone is not sufficient -- pair it with OS-level isolation (a separate process/container with its own network and filesystem restrictions) or use a purpose-built sandboxing runtime. Capability gating and rate limits here are for organizing and throttling code you already trust, not for containing code you don't.
+
+## Threat model by mode
+
+What each mode is built to stop, and what it is not. "Hostile" means code actively trying to escape or abuse the host.
+
+| | `worker` / `node-worker` | `wasm` |
+|---|---|---|
+| **Runs in** | The Worker's own JS engine (`new Function`) | QuickJS-ng compiled to WebAssembly, inside the Worker / worker thread |
+| **Reaching `fetch`, `WebSocket`, `importScripts`, `indexedDB`, `postMessage`** | Possible. They are Worker globals the code can call. | Not possible. The engine has no such globals, and `constructor`/`eval`/`Function` chains only reach the guest realm. |
+| **Forging protocol messages to the host** | Possible in principle (`self.postMessage`); ids are random, which only slows a guess. | Not possible. The guest has no `postMessage` or `self`. |
+| **`sandboxImport` of arbitrary URLs / Node builtins** | Loaded and executed (browser) or blocked only with `nodeWorker.permissions` (Node). | Refused: only virtual modules resolve; no URL is fetched. |
+| **Prototype-chain names via `host.call`** | Closed by the capability gate (`Object.create(null)`). | Same gate, plus the guest never sees host objects. |
+| **Infinite loops** | `terminate()` after `timeoutMs`, then a new Worker. | Deterministic `fuel` and a wall-clock `deadlineMs` stop it without a respawn; `terminate()` remains the backstop. |
+| **Memory exhaustion** | Browser: nothing but the tab limit. Node: opt-in `nodeWorker.maxMemoryMb`. | Guest heap cap plus a hard cap on the engine's linear memory. |
+| **Deep recursion** | Engine stack limit of the host JS engine. | `stackBytes`; overflow is a catchable `RangeError`. |
+| **Capability abuse** | `gateCapabilities()` rate and size limits (cooperative callers). | Same. |
+
+**What `wasm` mode does not defend against**
+
+- **Bugs in QuickJS-ng or in the WebAssembly engine.** A memory-safety bug in QuickJS is confined to the module's linear memory, but a bug in the browser's WebAssembly implementation is a browser sandbox escape. Keep browsers and Node updated; pinning the engine version here is a reproducibility choice, not a security update channel.
+- **What your capabilities do.** `host.call` is the whole attack surface. A capability that reads any path, fetches any URL, or evals what it is given is an escape hatch by design. Validate arguments host-side, and keep side-effecting capabilities idempotent: a deadline or restart does not undo a host call already in flight ([andbox#8](https://github.com/johnhenry/andbox/issues/8)).
+- **Timing and side channels.** QuickJS exposes `Date.now()` and `performance.now()` from the host clock, so a guest can measure time and mount timing attacks on anything the host does in response. andbox does not coarsen those clocks. (QuickJS has no threads, so there is no shared-memory clock on top of them.)
+- **Denial of service beyond the limits.** Fuel, memory and deadline bound one `evaluate()`; they do not bound how many you start, how big a capability result is, or CPU time spent *inside* the host while serving a call. Concurrent calls share one thread.
+- **The host trusting the result.** Return values are plain JSON from untrusted code; treat them as untrusted input.
+- **`nodeWorker.permissions`** is not available in this mode, and a worker thread still shares the process. For hostile code on a server, add OS-level isolation as the [Security model](#security-model) says.
+
+**What `worker` and `node-worker` do not defend against** is the "What is still yours" list in the [Security model](#security-model): they are for code you trust to be well-behaved, not for containing code that is trying to get out. `inline` and `data-uri` provide no isolation at all.
 
 ## Family
 
