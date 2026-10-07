@@ -305,7 +305,35 @@ export interface SandboxOptions {
   policy?: GatePolicy;
   /** Console output handler. Called when sandboxed code uses console.log/warn/error/etc. */
   onConsole?: (level: string, ...args: string[]) => void;
+  /**
+   * Worker mode selection. Omitted/`'worker'` uses a Web Worker, or
+   * `node:worker_threads` automatically when run under Node with no global
+   * `Worker`. `'node-worker'` forces the Node implementation.
+   */
+  mode?: 'worker' | 'node-worker';
+  /**
+   * Supply the Worker implementation: given the worker script source, return
+   * a Web-Worker-shaped object. Overrides automatic selection. See
+   * `createNodeWorkerFactory()`.
+   */
+  workerFactory?: (source: string) => WorkerLike;
 }
+
+/** The subset of the Web Worker interface andbox drives. */
+export interface WorkerLike {
+  onmessage: ((ev: { data: any }) => void) | null;
+  onerror: ((ev: { message?: string }) => void) | null;
+  postMessage(message: unknown): void;
+  addEventListener(type: 'message', fn: (ev: { data: any }) => void): void;
+  removeEventListener(type: 'message', fn: (ev: { data: any }) => void): void;
+  terminate(): void;
+}
+
+/**
+ * Node only: load `node:worker_threads` and return a synchronous factory that
+ * runs andbox's worker source in a thread. Suitable for `workerFactory`.
+ */
+export declare function createNodeWorkerFactory(): Promise<(source: string) => WorkerLike>;
 
 /** Sandbox statistics. */
 export interface SandboxStats {

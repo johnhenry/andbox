@@ -10,7 +10,7 @@ jobs:
   test:
     uses: johnhenry/workflows/.github/workflows/ci.yml@v1
     with:
-      node-versions: '["24"]'
+      node-versions: '["26"]'
       os: '["ubuntu-latest"]'
       # andbox has no committed package-lock.json.
       install-command: npm install

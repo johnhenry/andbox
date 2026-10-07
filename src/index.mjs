@@ -15,3 +15,4 @@ export { DEFAULT_TIMEOUT_MS, DEFAULT_LIMITS, DEFAULT_CAPABILITY_LIMITS } from '.
 export { makeWorkerSource } from './worker-source.mjs';
 export { makeServiceWorkerSource } from './service-worker-source.mjs';
 export { resolveServiceWorkerResponse } from './service-worker-response.mjs';
+export { createNodeWorkerFactory } from './node-worker.mjs';
