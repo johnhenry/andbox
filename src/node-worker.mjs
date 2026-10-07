@@ -85,6 +85,9 @@ export async function createNodeWorkerFactory() {
   if (!isNodeRuntime()) {
     throw new Error("createNodeWorkerFactory() requires Node (node:worker_threads); in a browser use mode: 'worker'.");
   }
-  const { Worker: ThreadWorker } = await import('node:worker_threads');
+  // Non-literal specifier: bundlers (webpack 5 fails on an unresolvable
+  // `node:` scheme) must not try to resolve this browser-irrelevant import.
+  const specifier = 'node:' + 'worker_threads';
+  const { Worker: ThreadWorker } = await import(/* @vite-ignore */ /* webpackIgnore: true */ specifier);
   return (source) => new NodeWebWorker(ThreadWorker, source);
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.5
+
+- The Node-mode `import('node:worker_threads')` now uses a non-literal
+  specifier with `@vite-ignore` / `webpackIgnore` hints, so browser bundlers
+  (webpack 5 failed on the unresolvable `node:` scheme; Vite warned) no
+  longer try to resolve it. A new test bundles `src/index.mjs` for the
+  browser with esbuild and asserts no `node:` resolution error.
+
 ## 0.0.4
 
 - Added a **Node mode**: `createSandbox()` now works under Node with no
