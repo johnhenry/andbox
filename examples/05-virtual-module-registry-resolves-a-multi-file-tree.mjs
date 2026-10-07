@@ -45,6 +45,10 @@ const registry = createVirtualModuleRegistry(
     // A real npm/CDN import lives alongside the virtual files -- it should
     // resolve via the import map, not get treated as a relative path.
     importMap: { imports: { zod: 'https://esm.sh/zod@3' } },
+    // Pin the browser (blob:) backend so this example shows blob: URLs even
+    // under Node, where the default is an importable andbox-vfs: backend
+    // (see README: createVirtualModuleRegistry).
+    backend: 'blob',
   }
 );
 

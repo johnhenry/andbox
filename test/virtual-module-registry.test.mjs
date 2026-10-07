@@ -20,7 +20,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createVirtualModuleRegistry } from '../src/virtual-module-registry.mjs';
+import { createVirtualModuleRegistry as create } from '../src/virtual-module-registry.mjs';
+
+// These tests pin the browser (blob:) backend; the Node backend has its own
+// suite in virtual-module-registry-node.test.mjs.
+const createVirtualModuleRegistry = (files, options) => create(files, { ...options, backend: 'blob' });
 
 async function textAt(url) {
   const res = await fetch(url);

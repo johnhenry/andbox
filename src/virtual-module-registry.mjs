@@ -10,12 +10,14 @@
  */
 
 import { resolveWithImportMap } from './import-map-resolver.mjs';
+import { getHostNodeVfs } from './node-vfs.mjs';
 
 /**
  * @typedef {Object} VirtualModuleRegistry
  * @property {(path: string) => string | null} resolve
  * @property {(specifier: string, parentPath?: string) => string | null} resolveSpecifier
  * @property {(path: string, source: string) => string} define
+ * @property {(path: string) => string | null} source
  * @property {(path: string) => boolean} has
  * @property {() => string[]} paths
  * @property {() => void} dispose
@@ -23,18 +25,43 @@ import { resolveWithImportMap } from './import-map-resolver.mjs';
  */
 
 /**
- * Create a registry of in-memory files, each backed by its own `blob:` URL.
+ * Create a registry of in-memory files.
+ *
+ * In a browser each file is backed by its own `blob:` URL. Under Node, whose
+ * ESM loader cannot `import()` a `blob:` URL, the registry is backed by an
+ * in-thread module hook instead (see `node-vfs.mjs`): `resolve(path)`
+ * returns an `andbox-vfs://<id>/<path>?v=<n>` URL that Node *can* `import()`,
+ * and files in the registry can import each other by relative path
+ * (`./util.js`), by bare name, and through the registry's import map.
+ * Call `dispose()` to drop the files.
+ * `options.backend` is `'auto'` (default: Node hooks under Node, blob
+ * elsewhere), `'blob'` or `'node'`.
  *
  * @param {Record<string, string>} [files] - path → source text
- * @param {{ importMap?: { imports?: Record<string,string>, scopes?: Record<string,Record<string,string>> } }} [options]
+ * @param {{ backend?: 'auto' | 'blob' | 'node', importMap?: { imports?: Record<string,string>, scopes?: Record<string,Record<string,string>> } }} [options]
  * @returns {VirtualModuleRegistry}
  */
 export function createVirtualModuleRegistry(files = {}, options = {}) {
   const importMap = options.importMap || null;
-  const urls = new Map(); // path -> blob: URL
+  const urls = new Map(); // path -> blob: / andbox-vfs: URL
+  const sources = new Map(); // path -> source text
+  const backend = options.backend ?? 'auto';
+  if (!['auto', 'blob', 'node'].includes(backend)) {
+    throw new Error(`Unknown registry backend '${backend}'; use 'auto', 'blob' or 'node'`);
+  }
+  const vfs = backend === 'blob' ? null : getHostNodeVfs();
+  if (backend === 'node' && !vfs) throw new Error("backend: 'node' requires Node (module.registerHooks)");
+  const ns = vfs ? Math.random().toString(36).slice(2, 10) + Date.now().toString(36) : null;
   let disposed = false;
+  if (vfs) vfs.setImportMap(ns, importMap);
 
   function blobify(path, source) {
+    sources.set(path, source);
+    if (vfs) {
+      const url = vfs.define(ns, path, source);
+      urls.set(path, url);
+      return url;
+    }
     const blob = new Blob([source], { type: 'text/javascript' });
     const url = URL.createObjectURL(blob);
     urls.set(path, url);
@@ -70,8 +97,20 @@ export function createVirtualModuleRegistry(files = {}, options = {}) {
    */
   function define(path, source) {
     assertNotDisposed();
-    if (urls.has(path)) URL.revokeObjectURL(urls.get(path));
+    if (!vfs && urls.has(path)) URL.revokeObjectURL(urls.get(path));
     return blobify(path, source);
+  }
+
+  /**
+   * The source text registered for a path (works in every runtime, including
+   * Node where the URL is not fetchable).
+   *
+   * @param {string} path
+   * @returns {string | null}
+   */
+  function source(path) {
+    assertNotDisposed();
+    return sources.get(path) ?? null;
   }
 
   /** @param {string} path */
@@ -129,14 +168,17 @@ export function createVirtualModuleRegistry(files = {}, options = {}) {
   function dispose() {
     if (disposed) return;
     disposed = true;
-    for (const url of urls.values()) URL.revokeObjectURL(url);
+    if (vfs) vfs.dispose(ns);
+    else for (const url of urls.values()) URL.revokeObjectURL(url);
     urls.clear();
+    sources.clear();
   }
 
   return {
     resolve,
     resolveSpecifier,
     define,
+    source,
     has,
     paths,
     dispose,
