@@ -11,6 +11,8 @@
  */
 
 import { makeWorkerSource } from './worker-source.mjs';
+import { makeWasmWorkerSource } from './wasm-worker-source.mjs';
+import { resolveWithImportMap } from './import-map-resolver.mjs';
 import { gateCapabilities } from './capability-gate.mjs';
 import { makeDeferred, makeTimeoutError, makeAbortError } from './deferred.mjs';
 import { DEFAULT_TIMEOUT_MS } from './constants.mjs';
@@ -305,7 +307,7 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {(level: string, ...args: string[]) => void} [onConsole] - Console output handler
  */
 
-const SUPPORTED_MODES = ['worker', 'node-worker', 'inline', 'data-uri', 'service-worker'];
+const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'inline', 'data-uri', 'service-worker'];
 
 /**
  * Create a new sandboxed runtime.
@@ -324,10 +326,73 @@ export function createSandbox(options = {}) {
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
   if (mode === 'service-worker') return createServiceWorkerSandbox(options);
-  return createWorkerSandbox(options, mode === 'node-worker');
+  return createWorkerSandbox(options, mode === 'node-worker', mode === 'wasm');
 }
 
-async function createWorkerSandbox(options = {}, forceNode = false) {
+/** Default limits for `mode: 'wasm'` (0 = unlimited / not enforced). */
+const WASM_DEFAULTS = Object.freeze({
+  fuel: 0,
+  memoryBytes: 64 * 1024 * 1024,
+  stackBytes: 128 * 1024,
+});
+
+/**
+ * Extra grace (ms) the host's hard-kill backstop waits beyond the in-worker
+ * deadline, so a cooperative TimeoutError wins over terminate() + respawn.
+ */
+const WASM_BACKSTOP_GRACE_MS = 1000;
+
+function checkLimit(name, value) {
+  if (value === undefined) return;
+  if (!(typeof value === 'number' && Number.isFinite(value) && value >= 0)) {
+    throw new Error(`${name} must be a non-negative number (0 disables it); got ${String(value)}`);
+  }
+}
+
+/**
+ * Work out where the Worker should load the engine and `.wasm` from, and
+ * validate the limit options. Under Node the installed optional packages are
+ * used when no URLs are given; in a browser the URLs (or import map entries
+ * `@johnhenry/andbox/wasm-engine` / `@johnhenry/andbox/wasm`) are required.
+ */
+async function resolveWasmConfig(options, baseURL, usingNode) {
+  const { engineURL, wasmURL, fuel, memoryBytes, stackBytes, deadlineMs, importMap } = options;
+  checkLimit('fuel', fuel);
+  checkLimit('memoryBytes', memoryBytes);
+  checkLimit('stackBytes', stackBytes);
+  checkLimit('deadlineMs', deadlineMs);
+
+  const abs = (u) => (u == null ? null : new URL(u, baseURL).href);
+  let engine = abs(engineURL ?? resolveWithImportMap('@johnhenry/andbox/wasm-engine', importMap));
+  let wasm = abs(wasmURL ?? resolveWithImportMap('@johnhenry/andbox/wasm', importMap));
+
+  if (!engine && (usingNode || isNodeRuntime())) {
+    // Non-literal specifier: browser bundlers must not follow this Node-only file.
+    const spec = './node-' + 'wasm.mjs';
+    const { resolveNodeWasmEngine } = await import(/* @vite-ignore */ /* webpackIgnore: true */ spec);
+    const found = resolveNodeWasmEngine();
+    engine = found.engineURL;
+    wasm = wasm ?? found.wasmURL;
+  }
+  if (!engine || !wasm) {
+    throw new Error(
+      "createSandbox({ mode: 'wasm' }) needs `engineURL` (an ES module built from " +
+      "@johnhenry/andbox/src/wasm-engine.mjs) and `wasmURL` (the QuickJS .wasm file), both served " +
+      'from your own origin. See the README section on mode: wasm for the two-command setup.'
+    );
+  }
+  return {
+    engine: { engineURL: engine, wasmURL: wasm },
+    limits: {
+      fuel: fuel ?? WASM_DEFAULTS.fuel,
+      memoryBytes: memoryBytes ?? WASM_DEFAULTS.memoryBytes,
+      stackBytes: stackBytes ?? WASM_DEFAULTS.stackBytes,
+      deadlineMs, // undefined -> the per-evaluate timeout
+    },
+  };
+}
+
+async function createWorkerSandbox(options = {}, forceNode = false, isWasm = false) {
   const {
     importMap = { imports: {}, scopes: {} },
     capabilities = {},
@@ -356,6 +421,20 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     );
   }
 
+  // mode: 'wasm' -- resolve the engine location and limits up front so a
+  // missing optional dependency fails here, with an install hint.
+  let wasmConfig = null;
+  if (isWasm) {
+    if (nodeWorker?.permissions) {
+      throw new Error(
+        "nodeWorker.permissions is not supported with mode: 'wasm' yet: the Worker has to read the " +
+        'engine and .wasm file from disk, which the permission model blocks. The WASM engine is the ' +
+        'isolation layer in this mode; see the README threat model.'
+      );
+    }
+    wasmConfig = await resolveWasmConfig(options, baseURL, usingNode);
+  }
+
   // Gate capabilities with rate limits
   const { gated: gatedCaps, stats: gateStats } = gateCapabilities(capabilities, policy);
 
@@ -382,10 +461,13 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
   // Pending evaluations
   const pending = new Map(); // id -> { resolve, reject, timer }
 
+  // mode: 'wasm' bookkeeping (stats() adds these)
+  const wasmStats = { fuelUsed: 0, peakMemoryBytes: 0, totalFuelUsed: 0 };
+
   // ── Worker lifecycle ──
 
   function createWorker() {
-    const source = makeWorkerSource();
+    const source = isWasm ? makeWasmWorkerSource() : makeWorkerSource();
     if (workerFactory) {
       worker = workerFactory(source);
       attachWorkerHandlers();
@@ -411,11 +493,17 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
           if (entry) {
             pending.delete(msg.id);
             if (entry.timer) clearTimeout(entry.timer);
+            if (msg.stats) {
+              wasmStats.fuelUsed = msg.stats.fuelUsed;
+              wasmStats.totalFuelUsed += msg.stats.fuelUsed;
+              wasmStats.peakMemoryBytes = Math.max(wasmStats.peakMemoryBytes, msg.stats.peakMemoryBytes);
+            }
             if (msg.success) {
               entry.resolve(msg.value);
             } else {
               const err = new Error(msg.error?.message || 'Evaluation failed');
               err.name = msg.error?.name || 'Error';
+              if (msg.error?.code) err.code = msg.error.code;
               entry.reject(err);
             }
           }
@@ -437,6 +525,9 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     };
 
     worker.onerror = (e) => {
+      // A Worker that fails while starting up (script error, engine load
+      // failure) must reject createSandbox()/restart instead of hanging it.
+      if (rejectConfigure) rejectConfigure(new Error(`Worker error: ${e.message}`));
       // Reject all pending on Worker error
       for (const [id, entry] of pending) {
         pending.delete(id);
@@ -446,12 +537,20 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     };
   }
 
+  let rejectConfigure = null;
   async function configureWorker() {
-    const { promise, resolve } = makeDeferred();
+    const { promise, resolve, reject } = makeDeferred();
+    rejectConfigure = reject;
     const handler = ({ data }) => {
       if (data.type === 'configured') {
         worker.removeEventListener('message', handler);
-        resolve();
+        if (data.error) {
+          const err = new Error(`Failed to load the WASM engine: ${data.error.message}`);
+          err.code = 'ERR_ANDBOX_ENGINE';
+          reject(err);
+        } else {
+          resolve();
+        }
       }
     };
     worker.addEventListener('message', handler);
@@ -460,8 +559,14 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
       importMap,
       baseURL,
       virtualModules: Object.fromEntries(virtualModules),
+      ...(wasmConfig ? { wasm: { ...wasmConfig.engine, memoryBytes: wasmConfig.limits.memoryBytes } } : {}),
     });
-    await promise;
+    try {
+      await promise;
+    } finally {
+      rejectConfigure = null;
+      worker?.removeEventListener('message', handler);
+    }
   }
 
   async function handleCapabilityCall(rpcId, name, args) {
@@ -522,6 +627,9 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
    */
   async function evaluate(code, opts = {}) {
     if (disposed) throw new Error('Sandbox is disposed');
+    if (wasmConfig) {
+      for (const k of ['fuel', 'memoryBytes', 'stackBytes', 'deadlineMs']) checkLimit(k, opts[k]);
+    }
     if (!worker || worker.dead) await restartWorker();
     beginOp();
 
@@ -538,14 +646,31 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
       activeConsoleHandler = opts.onConsole;
     }
 
+    // mode: 'wasm' -- limits travel with the call. The in-worker deadline
+    // (default: this call's timeoutMs) ends a busy loop gracefully; the
+    // host-side timer below becomes a hard-kill backstop a little later.
+    let wasmLimits = null;
+    let backstopMs = timeoutMs;
+    if (wasmConfig) {
+      const base = wasmConfig.limits;
+      const deadline = opts.deadlineMs ?? base.deadlineMs ?? (timeoutMs > 0 ? timeoutMs : 0);
+      wasmLimits = {
+        fuel: opts.fuel ?? base.fuel,
+        memoryBytes: opts.memoryBytes ?? base.memoryBytes,
+        stackBytes: opts.stackBytes ?? base.stackBytes,
+        deadlineMs: deadline,
+      };
+      if (timeoutMs > 0) backstopMs = Math.max(timeoutMs, deadline) + WASM_BACKSTOP_GRACE_MS;
+    }
+
     let timer = null;
-    if (timeoutMs > 0) {
+    if (backstopMs > 0) {
       timer = setTimeout(() => {
         pending.delete(id);
         reject(makeTimeoutError(timeoutMs));
         // Hard kill and restart — only reliable way to stop infinite loops
         restartWorker().catch(() => {});
-      }, timeoutMs);
+      }, backstopMs);
     }
 
     // AbortSignal support
@@ -567,7 +692,7 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
     }
 
     pending.set(id, { resolve, reject, timer });
-    worker.postMessage({ type: 'evaluate', id, code });
+    worker.postMessage({ type: 'evaluate', id, code, ...(wasmLimits ? { limits: wasmLimits } : {}) });
 
     // Restore console handler when evaluation completes
     return promise.finally(() => {
@@ -628,6 +753,7 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
       pendingEvaluations: pending.size,
       virtualModules: [...virtualModules.keys()],
       gate: gateStats(),
+      ...(wasmConfig ? { fuelUsed: wasmStats.fuelUsed, peakMemoryBytes: wasmStats.peakMemoryBytes, totalFuelUsed: wasmStats.totalFuelUsed } : {}),
     };
   }
 
@@ -636,6 +762,10 @@ async function createWorkerSandbox(options = {}, forceNode = false) {
   try {
     createWorker();
     await configureWorker();
+  } catch (e) {
+    // e.g. the WASM engine failed to load: do not leave the thread running.
+    terminateWorker();
+    throw e;
   } finally {
     endOp();
   }

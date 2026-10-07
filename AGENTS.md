@@ -60,6 +60,15 @@ locally.
   any refactor that reintroduces a plain `{}` object reopens the
   prototype-chain bypass this fixed.
 
+- **`mode: 'wasm'` runs QuickJS, not the Worker's engine.** Its worker script
+  (`src/wasm-worker-source.mjs`) is a real function stringified with
+  `toString()`, so it must stay free of outside references. The memory limit
+  of this QuickJS build only counts allocation blocks (no `malloc_usable_size`),
+  which is why the heap check in the interrupt handler and the hard cap on the
+  engine's `WebAssembly.Memory` exist; do not "simplify" them away. Stack caps
+  above ~192 KiB overflow the *host* stack in a Chrome Worker.
+  `examples/08-wasm-browser/run-headless.mjs` is the only real-browser check.
+
 ## Definition of done
 
 A change is done when all of the following hold, not just when tests pass:
@@ -79,7 +88,9 @@ andbox is deliberately not a security sandbox against adversarial code --
 see `## Security model` in the README. Adding OS-level isolation, a
 Realms/Compartments-based execution strategy, or a general capability
 system that closes every item under "What is still yours" is out of scope
-for this package; the README documents these as the reason to pair andbox
+for this package (the optional `mode: 'wasm'`, QuickJS in WebAssembly, is the
+one stronger strategy that exists, and its limits are in the README's threat
+model); the README documents these as the reason to pair andbox
 with OS-level isolation instead of treating it as one.
 
 ## Releases

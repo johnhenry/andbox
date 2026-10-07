@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,5 +29,24 @@ describe('browser bundle', () => {
       rmSync(dir, { recursive: true, force: true });
     }
     assert.doesNotMatch(out.stderr, /node:|built into node/);
+  });
+
+  it('bundles the wasm engine entry into one browser ES module with no node: imports', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'andbox-engine-bundle-'));
+    const outfile = join(dir, 'andbox-quickjs.mjs');
+    try {
+      await run(esbuild, [
+        'src/wasm-engine.mjs', '--bundle', '--platform=browser', '--format=esm', '--minify', `--outfile=${outfile}`,
+      ], { cwd: root });
+      const code = readFileSync(outfile, 'utf8');
+      assert.doesNotMatch(code, /["']node:/, 'browser bundle must not reference node: builtins');
+      assert.match(code, /newQuickJSWASMModuleFromVariant/);
+      assert.ok(statSync(outfile).size < 150_000, `engine bundle is ${statSync(outfile).size} bytes`);
+    } catch (e) {
+      if (e.name === 'AssertionError') throw e;
+      assert.fail(`esbuild engine bundle failed:\n${e.stderr || e.message}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

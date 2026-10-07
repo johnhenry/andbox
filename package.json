@@ -1,15 +1,19 @@
 {
   "name": "@johnhenry/andbox",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "type": "module",
-  "description": "Sandboxed JavaScript runtime with Worker isolation, RPC, import maps, and timeouts",
+  "description": "Sandboxed JavaScript runtime with Worker isolation, RPC, import maps, timeouts, and an optional QuickJS-in-WebAssembly mode",
   "main": "./src/index.mjs",
   "types": "./src/index.d.ts",
   "exports": {
     ".": {
       "types": "./src/index.d.ts",
       "import": "./src/index.mjs"
-    }
+    },
+    "./wasm-engine": {
+      "import": "./src/wasm-engine.mjs"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "src",
@@ -23,7 +27,10 @@
     "example:03": "node examples/03-network-allowlist-blocks-unapproved-hosts.mjs",
     "example:04": "node examples/04-runaway-code-gets-timed-out.mjs",
     "example:05": "node examples/05-virtual-module-registry-resolves-a-multi-file-tree.mjs",
-    "examples": "npm run example:01 && npm run example:02 && npm run example:03 && npm run example:04 && npm run example:05"
+    "examples": "npm run example:01 && npm run example:02 && npm run example:03 && npm run example:04 && npm run example:05 && npm run example:07",
+    "example:07": "node examples/07-wasm-mode-contains-hostile-code.mjs",
+    "example:08:build": "node examples/08-wasm-browser/build.mjs",
+    "example:08:headless": "node examples/08-wasm-browser/build.mjs && node examples/08-wasm-browser/run-headless.mjs"
   },
   "keywords": [
     "sandbox",
@@ -31,7 +38,9 @@
     "isolation",
     "rpc",
     "browser",
-    "javascript"
+    "javascript",
+    "wasm",
+    "quickjs"
   ],
   "license": "MIT",
   "repository": {
@@ -43,8 +52,22 @@
     "node": ">=26.0.0"
   },
   "devDependencies": {
+    "@jitl/quickjs-ng-wasmfile-release-sync": "0.32.0",
     "esbuild": "^0.28.2",
+    "quickjs-emscripten-core": "0.32.0",
     "vite": "^8.3.3",
     "webpack": "^5.111.1"
+  },
+  "peerDependencies": {
+    "@jitl/quickjs-ng-wasmfile-release-sync": "0.32.0",
+    "quickjs-emscripten-core": "0.32.0"
+  },
+  "peerDependenciesMeta": {
+    "@jitl/quickjs-ng-wasmfile-release-sync": {
+      "optional": true
+    },
+    "quickjs-emscripten-core": {
+      "optional": true
+    }
   }
 }

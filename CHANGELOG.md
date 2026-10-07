@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.0.8
+
+- **New: `mode: 'wasm'`.** Runs the evaluated code in QuickJS-ng compiled to
+  WebAssembly inside the existing Worker (browser) or `worker_thread` (Node),
+  so `host.call` is the only authority: no `fetch`, `WebSocket`,
+  `importScripts`, `indexedDB`, `postMessage` or `self` exist in the engine,
+  and `sandboxImport()`/`import()` resolve only virtual modules. Real limits:
+  deterministic `fuel` (interrupt polls), `memoryBytes` (JS heap cap plus a hard
+  cap on the engine's linear memory), `stackBytes`, and a wall-clock
+  `deadlineMs`; `terminate()` stays the backstop. Failures carry distinct
+  codes: `FuelExhaustedError` / `ERR_ANDBOX_FUEL_EXHAUSTED`, `MemoryLimitError`
+  / `ERR_ANDBOX_MEMORY_LIMIT`, `TimeoutError` / `ERR_ANDBOX_DEADLINE`,
+  `EngineError` / `ERR_ANDBOX_ENGINE`; the Worker survives all of them.
+  Capability gating, rate limits, `onConsole`, `defineModule` and the
+  `evaluate()` result shape are shared with worker mode. `stats()` adds
+  `fuelUsed`, `peakMemoryBytes` and `totalFuelUsed`. Closes
+  [#21](https://github.com/johnhenry/andbox/issues/21).
+- The engine is an **optional** peer dependency pinned to exact versions
+  (`quickjs-emscripten-core@0.32.0`,
+  `@jitl/quickjs-ng-wasmfile-release-sync@0.32.0`). Missing packages give
+  `ERR_ANDBOX_ENGINE_MISSING` with the install command; the default mode and the
+  main entry are unchanged. For browsers without a CDN, bundle
+  `@johnhenry/andbox/wasm-engine` and serve the `.wasm` yourself, then pass
+  `engineURL` / `wasmURL` (or the import map entries
+  `@johnhenry/andbox/wasm-engine` and `@johnhenry/andbox/wasm`).
+  `examples/08-wasm-browser/` is a working recipe, verified in headless Chrome.
+- README: a `mode: 'wasm'` section and a per-mode threat model.
+- Startup failures of a Worker (including an engine that cannot load) now reject
+  `createSandbox()` instead of hanging it, and the thread is not leaked.
+- The sync QuickJS variant is used (not the asyncify one): host calls are
+  promise-based, so concurrent `host.call`s work and the `.wasm` is half the
+  size (528 KB vs 1.2 MB).
+- Release numbering: still `0.0.x`, as for every feature since the scoped
+  restart. The old unscoped `andbox` already used the `v0.1.x` git tags.
+
 ## 0.0.7
 
 - **Fixed:** `evaluate()` code whose last line ends in a `//` comment (for
