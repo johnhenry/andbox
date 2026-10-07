@@ -167,10 +167,12 @@ self.onmessage = async ({ data: msg }) => {
     case 'evaluate': {
       const fwdConsole = makeForwardingConsole(msg.id);
       try {
-        // Wrap in async function for top-level await
+        // Wrap in async function for top-level await. The newlines before and
+        // after the user code matter: without the trailing one, code ending in
+        // a // line comment swallows the closing brace (andbox#23).
         const asyncFn = new Function(
           'sandboxImport', 'host', 'console',
-          \`return (async () => { \${msg.code} })();\`
+          \`return (async () => {\\n\${msg.code}\\n})();\`
         );
         const result = await asyncFn(sandboxImport, host, fwdConsole);
         self.postMessage({ type: 'result', id: msg.id, success: true, value: serialize(result) });

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.7
+
+- **Fixed:** `evaluate()` code whose last line ends in a `//` comment (for
+  example `return x // done`) no longer fails with
+  `SyntaxError: Unexpected end of input`. The worker wrapper now puts a newline
+  before the closing brace so the comment cannot swallow it. Regression tests
+  cover the three cases from the issue plus inline and data-uri modes. Closes
+  [#23](https://github.com/johnhenry/andbox/issues/23).
+
 ## 0.0.6
 
 Closes the remaining Node-mode gaps from 0.0.4/0.0.5.
