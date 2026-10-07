@@ -13,7 +13,7 @@ jobs:
         # see johnhenry/workflows' README for why this must be declared here too.
     uses: johnhenry/workflows/.github/workflows/npm-publish.yml@v1
     with:
-      node-version: "24"
+      node-version: "26"
       # andbox has no committed package-lock.json.
       install-command: npm install
       node-cache: ""

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.4
+
+- Added a **Node mode**: `createSandbox()` now works under Node with no
+  `Worker` shim. When there is no global `Worker` and the runtime is Node,
+  the default `worker` mode runs the same worker script on
+  `node:worker_threads` (source passed with `{ eval: true }`, no blob: URLs;
+  `terminate()`, timeouts, restarts, RPC and error propagation behave as in
+  the browser). `mode: 'node-worker'` forces it, and the new `workerFactory`
+  option plus exported `createNodeWorkerFactory()` let hosts supply their
+  own. Virtual modules (`defineModule`/`sandboxImport`) use `data:` URLs
+  inside the thread. The browser path is unchanged. Closes
+  [#22](https://github.com/johnhenry/andbox/issues/22).
+- `mode: 'data-uri'` now works under Node (uses a `data:` URL, since Node
+  cannot `import()` a `blob:` URL).
+- Fixed `mode: 'data-uri'` with non-empty `globals`: the generated preamble
+  read `globalThis.__andbox_globals__` after the wrapper had already deleted
+  it, so every such call threw. It now destructures from the captured value.
+- CI and publish now run on Node 26 (matching `engines`).
+
 ## 0.0.3
 
 - Fixed the package's `exports` map: it was a bare `"./src/index.mjs"`

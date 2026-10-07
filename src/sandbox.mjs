@@ -14,6 +14,7 @@ import { makeWorkerSource } from './worker-source.mjs';
 import { gateCapabilities } from './capability-gate.mjs';
 import { makeDeferred, makeTimeoutError, makeAbortError } from './deferred.mjs';
 import { DEFAULT_TIMEOUT_MS } from './constants.mjs';
+import { isNodeRuntime, createNodeWorkerFactory } from './node-worker.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
@@ -62,7 +63,7 @@ function createDataUriSandbox(opts = {}) {
       const output = [];
       const globalEntries = Object.entries(globals);
       const preamble = globalEntries.length > 0
-        ? `const { ${globalEntries.map(([k]) => k).join(', ')} } = globalThis.__andbox_globals__;\n`
+        ? `const { ${globalEntries.map(([k]) => k).join(', ')} } = __globals__;\n`
         : '';
       const wrappedCode = `
 const __globals__ = globalThis.__andbox_globals__;
@@ -70,8 +71,11 @@ const print = globalThis.__andbox_print__;
 delete globalThis.__andbox_globals__;
 delete globalThis.__andbox_print__;
 ${preamble}${code}`;
-      const blob = new Blob([wrappedCode], { type: 'text/javascript' });
-      const url = URL.createObjectURL(blob);
+      // Node's ESM loader cannot import() a blob: URL; it can a data: URL.
+      const nodeRuntime = isNodeRuntime();
+      const url = nodeRuntime
+        ? 'data:text/javascript;base64,' + Buffer.from(wrappedCode).toString('base64')
+        : URL.createObjectURL(new Blob([wrappedCode], { type: 'text/javascript' }));
       const print = (...args) => {
         output.push(args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
       };
@@ -92,7 +96,7 @@ ${preamble}${code}`;
         return { success: false, output: output.join('\n'), error: e.message || String(e) };
       } finally {
         clearTimeout(timer);
-        URL.revokeObjectURL(url);
+        if (!nodeRuntime) URL.revokeObjectURL(url);
         delete globalThis.__andbox_globals__;
         delete globalThis.__andbox_print__;
       }
@@ -314,10 +318,10 @@ export function createSandbox(options = {}) {
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
   if (mode === 'service-worker') return createServiceWorkerSandbox(options);
-  return createWorkerSandbox(options);
+  return createWorkerSandbox(options, mode === 'node-worker');
 }
 
-async function createWorkerSandbox(options = {}) {
+async function createWorkerSandbox(options = {}, forceNode = false) {
   const {
     importMap = { imports: {}, scopes: {} },
     capabilities = {},
@@ -326,6 +330,14 @@ async function createWorkerSandbox(options = {}) {
     policy,
     onConsole,
   } = options;
+
+  // Node mode: no global Worker (and no blob: worker URLs) -> node:worker_threads.
+  // An explicit workerFactory always wins; 'node-worker' forces Node; the
+  // default selects it only when there is no global Worker under Node.
+  let workerFactory = options.workerFactory || null;
+  if (!workerFactory && (forceNode || (typeof Worker === 'undefined' && isNodeRuntime()))) {
+    workerFactory = await createNodeWorkerFactory();
+  }
 
   // Gate capabilities with rate limits
   const { gated: gatedCaps, stats: gateStats } = gateCapabilities(capabilities, policy);
@@ -346,10 +358,18 @@ async function createWorkerSandbox(options = {}) {
 
   function createWorker() {
     const source = makeWorkerSource();
+    if (workerFactory) {
+      worker = workerFactory(source);
+      attachWorkerHandlers();
+      return;
+    }
     const blob = new Blob([source], { type: 'application/javascript' });
     workerBlobURL = URL.createObjectURL(blob);
     worker = new Worker(workerBlobURL, { type: 'classic' });
+    attachWorkerHandlers();
+  }
 
+  function attachWorkerHandlers() {
     worker.onmessage = ({ data: msg }) => {
       switch (msg.type) {
         case 'configured':

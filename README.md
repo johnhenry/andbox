@@ -85,11 +85,12 @@ await sandbox.dispose();
 
 ## Sandbox Modes
 
-andbox supports four execution modes:
+andbox supports five execution modes:
 
 - **`worker`** (default) -- Runs in a dedicated Worker with an RPC bridge, import maps, virtual modules, and hard-kill timeout semantics. See [Security model](#security-model) for what this does and doesn't protect against.
+- **`node-worker`** -- The `worker` mode on `node:worker_threads`. Selected automatically under Node when there is no global `Worker`; see [Node](#node).
 - **`inline`** -- Same-thread execution via AsyncFunction. Lighter weight, no Worker overhead, no isolation at all -- code runs with full access to the calling context. Only for code you already trust.
-- **`data-uri`** -- Dynamic `import()` via Blob URL. Module-level separation without a Worker. Supports globals injection.
+- **`data-uri`** -- Dynamic `import()` via Blob URL (a `data:` URL under Node). Module-level separation without a Worker. Supports globals injection.
 - **`service-worker`** -- Not code execution at all: registers a Service Worker that serves an in-memory `path → content` map with real HTTP-shaped fetch/navigation semantics. For hosting a small virtual multi-file site (HTML/CSS/JS, arbitrary paths), not for running JS in isolation. See [andbox#14](https://github.com/johnhenry/andbox/issues/14) and [Security model](#security-model) -- this mode does **not** provide isolation by merely existing.
 
 ```js
@@ -110,6 +111,27 @@ const site = await createSandbox({
 });
 // Only navigate into scope *after* this resolves -- see Security model.
 ```
+
+## Node
+
+From 0.0.4 no shim is needed. Under Node (`engines >= 26`), `createSandbox()` just works:
+
+```js
+import { createSandbox } from '@johnhenry/andbox';
+const sandbox = await createSandbox({ capabilities: { now: () => Date.now() } });
+await sandbox.evaluate('return await host.call("now")');
+await sandbox.dispose(); // worker threads keep the process alive until disposed
+```
+
+**Mode selection.** `mode: 'worker'` (the default) picks `node:worker_threads` when `typeof Worker === 'undefined'` and the runtime is Node; if a global `Worker` exists (browser, or a shim you installed) that is used as before. `mode: 'node-worker'` forces the Node implementation. `workerFactory: (source) => WorkerLike` overrides both; `createNodeWorkerFactory()` is exported for that purpose.
+
+**How it works.** The same worker script the browser uses is passed to `new worker_threads.Worker(prelude + source, { eval: true })`. No blob URLs are created. The prelude maps `parentPort` to `self.postMessage`/`onmessage`/`close`, and makes the worker's virtual-module loader mint `data:` URLs (Node cannot `import()` a `blob:` URL). `node:worker_threads` is loaded with a dynamic `import()` so browser bundles never see a `node:` specifier. Timeouts, `AbortSignal`, and `dispose()` hard-kill the thread with `terminate()` and a fresh one is started on the next call.
+
+**Not supported / differences.**
+
+- `mode: 'service-worker'` needs a browser and rejects under Node.
+- Virtual modules are `data:` modules, so they cannot use *relative* imports of each other; use import maps or `sandboxImport()`. `createVirtualModuleRegistry()` still works as a path table in Node, but its `blob:` URLs cannot be `import()`ed there.
+- A worker thread is not a security boundary: it shares the process, and sandboxed code can reach `process` and `require`. Treat it like the browser Worker mode, which also is not a defense against hostile code (see [Security model](#security-model)); for untrusted code on a server add OS-level isolation.
 
 ## API
 
