@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.0
+
+Minor release because two fixes change behaviour (remote `sandboxImport()` is
+now deny-by-default; evaluated code no longer sees `self`, `postMessage`,
+`fetch` and friends in worker mode).
+
+### Security
+
+Every fix in the 2026-10 security sweep, with impact and affected versions:
+
+| Issue | Severity | Fix | Affected | Fixed in |
+|---|---|---|---|---|
+| [#5](https://github.com/johnhenry/andbox/issues/5) | Critical | Capability gate bypass via `host.call('constructor', ...)`: null-prototype gate table (0.0.1), `Map`-based own-name lookup, all `Object.prototype` names deny-tested end to end | unscoped `andbox` 0.1.x, `@johnhenry/andbox` 0.0.0 | 0.0.1, hardened 0.0.9 |
+| [#6](https://github.com/johnhenry/andbox/issues/6) | High | SSRF via redirect in `createNetworkFetch()`: `redirect: 'manual'`, any redirect rejected, verified against real redirecting servers | same | 0.0.1, verified 0.0.9 |
+| [#7](https://github.com/johnhenry/andbox/issues/7) | Medium | `sandboxImport()` loaded arbitrary remote code: remote `http(s)` specifiers (including `//host/...`) are denied unless the host is in the new `allowedImportHosts` option or is `baseURL`'s host | all before 0.1.0 | 0.1.0 |
+| [#8](https://github.com/johnhenry/andbox/issues/8) | Medium | Timeout did not cancel in-flight host-side capability effects: capabilities get `this.signal`, aborted when the Worker is terminated (cooperative) | all before 0.0.10 | 0.0.10 |
+| [#9](https://github.com/johnhenry/andbox/issues/9) | Low | Forgeable sequential ids: random UUID ids plus a per-evaluate nonce the host checks | all before 0.0.9 | 0.0.9 |
+| [#10](https://github.com/johnhenry/andbox/issues/10) | Architectural | Worker globals: `fetch`, `WebSocket`, `Worker`, `importScripts`, `postMessage`, `self`, ... are removed from the global scope and shadowed before evaluated code runs. Partial: a Worker is not a boundary (`import()`, timing channels and, under Node, `process`/`require` remain). Issue stays open; `mode: 'wasm'` is the containing option | all before 0.1.0 | 0.1.0 (partial) |
+| [#30](https://github.com/johnhenry/andbox/issues/30) | Stability | A capability finishing after its Worker was killed threw `TypeError` (process-fatal under Node): late results are dropped | all before 0.0.10 | 0.0.10 |
+
+### Changed (behaviour)
+
+- **`sandboxImport('https://...')` is refused by default.** Add the hostname to
+  `allowedImportHosts: ['esm.sh']` to restore it. Import-map entries pointing at
+  URLs keep working unchanged.
+- **Worker mode:** evaluated code no longer has `fetch`, `WebSocket`,
+  `WebSocketStream`, `WebTransport`, `EventSource`, `XMLHttpRequest`, `Worker`,
+  `SharedWorker`, `importScripts`, `indexedDB`, `caches`, `BroadcastChannel`,
+  `postMessage` or `self`, and a bare top-level `this` is no longer the global
+  object. Host capabilities (`host.call`) are the way to reach the network.
+  Code that needs the old behaviour should use `mode: 'inline'` or do the work
+  in a capability.
+
 ## 0.0.10
 
 ### Security

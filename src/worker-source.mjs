@@ -32,11 +32,48 @@ export function makeWorkerSource() {
 // ── State ──
 let importMap = { imports: {}, scopes: {} };
 let baseURL = 'https://andbox.local/';
+let allowedImportHosts = [];
 const virtualModules = new Map();
 // Node mode only: the adapter provides a loader that lets virtual modules
 // import each other. Captured once and removed from the global scope.
 const nodeVirtual = globalThis.__andboxNodeVirtual;
 try { delete globalThis.__andboxNodeVirtual; } catch {}
+
+// ── Worker-global lockdown (andbox#10, hardening only) ──
+// Capture what the runtime needs, then remove the ambient network/worker APIs
+// so evaluated code does not get them by name, via globalThis, via indirect
+// eval or via Function. This is NOT a security boundary: the platform \`import()\`
+// operator, Atomics/timing channels and, under Node, \`process\`/\`require\` stay
+// reachable. Use mode: 'wasm' (or an OS-level boundary) for hostile code.
+const scope = self;
+const post = self.postMessage.bind(self);
+const closeSelf = typeof self.close === 'function' ? self.close.bind(self) : () => {};
+const LOCKED_GLOBALS = [
+  'fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
+  'Worker', 'SharedWorker', 'importScripts', 'indexedDB', 'caches', 'BroadcastChannel',
+  'postMessage', 'self',
+];
+for (const k of LOCKED_GLOBALS) {
+  try { delete globalThis[k]; } catch {}
+  if (k in globalThis) {
+    try { Object.defineProperty(globalThis, k, { value: undefined, writable: false, configurable: false }); } catch {}
+  }
+}
+// Names shadowed lexically for evaluated code as well (covers environments
+// where a global could not be deleted).
+const SHADOWED = [...LOCKED_GLOBALS, 'window'];
+
+// ── Remote import policy (andbox#7) ──
+function assertImportAllowed(href) {
+  let u;
+  try { u = new URL(href); } catch { return; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+  const host = u.hostname.toLowerCase();
+  let baseHost = '';
+  try { baseHost = new URL(baseURL).hostname.toLowerCase(); } catch {}
+  if (host === baseHost || allowedImportHosts.includes(host)) return;
+  throw new Error(\`Import denied: \${host} is not in allowedImportHosts\`);
+}
 
 // ── Import Map Resolver (inlined) ──
 function resolveWithImportMap(specifier, map, parentURL) {
@@ -93,11 +130,13 @@ async function sandboxImport(specifier) {
   // 3. Relative/absolute URL — resolve against baseURL
   if (specifier.startsWith('./') || specifier.startsWith('../') || specifier.startsWith('/')) {
     const resolved = new URL(specifier, baseURL).href;
+    assertImportAllowed(resolved);
     return await import(resolved);
   }
 
   // 4. Absolute URL passthrough
   if (specifier.startsWith('http://') || specifier.startsWith('https://')) {
+    assertImportAllowed(specifier);
     return await import(specifier);
   }
 
@@ -113,7 +152,7 @@ function callCapability(name, args) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     pendingRpc.set(id, { resolve, reject });
-    self.postMessage({ type: 'capabilityCall', id, name, args });
+    post({ type: 'capabilityCall', id, name, args });
   });
 }
 
@@ -135,7 +174,7 @@ function makeForwardingConsole(evalId) {
             try { return typeof a === 'object' ? JSON.stringify(a) : String(a); }
             catch { return String(a); }
           });
-          self.postMessage({ type: 'console', evalId, level: prop, args: serialized });
+          post({ type: 'console', evalId, level: prop, args: serialized });
         };
       }
       return target[prop];
@@ -144,23 +183,24 @@ function makeForwardingConsole(evalId) {
 }
 
 // ── Message Handler ──
-self.onmessage = async ({ data: msg }) => {
+scope.onmessage = async ({ data: msg }) => {
   switch (msg.type) {
     case 'configure': {
       if (msg.importMap) importMap = msg.importMap;
       if (msg.baseURL) baseURL = msg.baseURL;
+      if (Array.isArray(msg.allowedImportHosts)) allowedImportHosts = msg.allowedImportHosts;
       if (msg.virtualModules) {
         for (const [name, src] of Object.entries(msg.virtualModules)) {
           virtualModules.set(name, src);
         }
       }
-      self.postMessage({ type: 'configured' });
+      post({ type: 'configured' });
       break;
     }
 
     case 'defineModule': {
       virtualModules.set(msg.name, msg.source);
-      self.postMessage({ type: 'moduleDefined', name: msg.name });
+      post({ type: 'moduleDefined', name: msg.name });
       break;
     }
 
@@ -171,13 +211,14 @@ self.onmessage = async ({ data: msg }) => {
         // after the user code matter: without the trailing one, code ending in
         // a // line comment swallows the closing brace (andbox#23).
         const asyncFn = new Function(
-          'sandboxImport', 'host', 'console',
+          'sandboxImport', 'host', 'console', ...SHADOWED,
           \`return (async () => {\\n\${msg.code}\\n})();\`
         );
-        const result = await asyncFn(sandboxImport, host, fwdConsole);
-        self.postMessage({ type: 'result', id: msg.id, nonce: msg.nonce, success: true, value: serialize(result) });
+        // \`this\` is a throwaway object so a bare \`this\` is not the global.
+        const result = await asyncFn.call(Object.freeze(Object.create(null)), sandboxImport, host, fwdConsole);
+        post({ type: 'result', id: msg.id, nonce: msg.nonce, success: true, value: serialize(result) });
       } catch (e) {
-        self.postMessage({
+        post({
           type: 'result',
           id: msg.id,
           nonce: msg.nonce,
@@ -207,7 +248,7 @@ self.onmessage = async ({ data: msg }) => {
         reject(new Error('Sandbox disposed'));
       }
       pendingRpc.clear();
-      self.close();
+      closeSelf();
       break;
     }
   }
