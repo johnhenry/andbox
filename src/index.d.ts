@@ -397,6 +397,13 @@ export interface SandboxOptions {
    * a live sandbox keeps the process alive until dispose().
    */
   unref?: boolean;
+  /**
+   * Hostnames `sandboxImport()` may load remote http(s) modules from, in
+   * addition to the host of `baseURL`. Default `[]`: remote imports are
+   * refused. Import-map targets and virtual modules are not affected. Does
+   * not restrict the platform `import()` operator in worker mode.
+   */
+  allowedImportHosts?: string[];
 }
 
 /** Options for the built-in Node worker_threads mode (`nodeWorker`). */

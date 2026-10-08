@@ -402,7 +402,13 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
     onConsole,
     nodeWorker,
     unref = false,
+    allowedImportHosts = [],
   } = options;
+
+  if (!Array.isArray(allowedImportHosts) || !allowedImportHosts.every((h) => typeof h === 'string')) {
+    throw new TypeError('allowedImportHosts must be an array of hostname strings');
+  }
+  const importHosts = allowedImportHosts.map((h) => h.toLowerCase());
 
   // Node mode: no global Worker (and no blob: worker URLs) -> node:worker_threads.
   // An explicit workerFactory always wins; 'node-worker' forces Node; the
@@ -561,6 +567,7 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
       type: 'configure',
       importMap,
       baseURL,
+      allowedImportHosts: importHosts,
       virtualModules: Object.fromEntries(virtualModules),
       ...(wasmConfig ? { wasm: { ...wasmConfig.engine, memoryBytes: wasmConfig.limits.memoryBytes } } : {}),
     });
