@@ -21,11 +21,12 @@ import { DEFAULT_LIMITS, DEFAULT_CAPABILITY_LIMITS } from './constants.mjs';
  *
  * @param {Record<string, Function>} capabilities - Raw capability functions.
  * @param {GatePolicy} [policy] - Rate limit policy.
- * @returns {{ gated: Record<string, Function>, stats: () => object }}
+ * @returns {{ gated: Record<string, Function>, lookup: (name: unknown) => Function | undefined, stats: () => object }}
  */
 export function gateCapabilities(capabilities, policy = {}) {
   const limits = { ...DEFAULT_LIMITS, ...policy.limits };
   const capPolicies = policy.capabilities || {};
+  const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
   let totalCalls = 0;
   let totalArgBytes = 0;
@@ -41,9 +42,12 @@ export function gateCapabilities(capabilities, policy = {}) {
   // like 'constructor' or 'toString' cannot resolve through the prototype
   // to real global functions and bypass the allowlist/rate limiting below.
   const gated = Object.create(null);
+  // Authoritative table for lookup(): a Map has no prototype-chain property
+  // semantics at all, so a string key either was granted or is absent.
+  const table = new Map();
 
   for (const [name, fn] of Object.entries(capabilities)) {
-    const capLimits = { ...DEFAULT_CAPABILITY_LIMITS, ...capPolicies[name] };
+    const capLimits = { ...DEFAULT_CAPABILITY_LIMITS, ...(hasOwn(capPolicies, name) ? capPolicies[name] : undefined) };
 
     gated[name] = async (...args) => {
       // Measure argument bytes
@@ -83,6 +87,18 @@ export function gateCapabilities(capabilities, policy = {}) {
         concurrent--;
       }
     };
+    table.set(name, gated[name]);
+  }
+
+  /**
+   * Resolve a capability by name. Only names the host explicitly granted
+   * resolve; non-strings and anything that exists only on Object.prototype
+   * (constructor, toString, __proto__, ...) return undefined.
+   * @param {unknown} name
+   * @returns {Function | undefined}
+   */
+  function lookup(name) {
+    return typeof name === 'string' ? table.get(name) : undefined;
   }
 
   function stats() {
@@ -94,5 +110,5 @@ export function gateCapabilities(capabilities, policy = {}) {
     };
   }
 
-  return { gated, stats };
+  return { gated, lookup, stats };
 }

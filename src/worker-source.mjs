@@ -175,11 +175,12 @@ self.onmessage = async ({ data: msg }) => {
           \`return (async () => {\\n\${msg.code}\\n})();\`
         );
         const result = await asyncFn(sandboxImport, host, fwdConsole);
-        self.postMessage({ type: 'result', id: msg.id, success: true, value: serialize(result) });
+        self.postMessage({ type: 'result', id: msg.id, nonce: msg.nonce, success: true, value: serialize(result) });
       } catch (e) {
         self.postMessage({
           type: 'result',
           id: msg.id,
+          nonce: msg.nonce,
           success: false,
           error: { message: e.message || String(e), name: e.name || 'Error', stack: e.stack },
         });

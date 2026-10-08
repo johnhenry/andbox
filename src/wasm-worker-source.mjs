@@ -462,7 +462,7 @@ function wasmWorkerMain() {
       }
       case 'evaluate': {
         const res = await runEval(msg);
-        self.postMessage({ type: 'result', id: msg.id, ...res });
+        self.postMessage({ type: 'result', id: msg.id, nonce: msg.nonce, ...res });
         break;
       }
       case 'capabilityResult': {

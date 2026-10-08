@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.0.9
+
+### Security
+
+- **Capability lookup is now own-property / `Map` based (hardening of
+  [#5](https://github.com/johnhenry/andbox/issues/5)).** The prototype-chain
+  bypass itself (`host.call('constructor', ...)`) was closed in 0.0.1 by building
+  the gated table with `Object.create(null)`. The host now additionally resolves
+  names through a `Map` (`gateCapabilities().lookup(name)`), so non-string names
+  and any name not explicitly granted can never resolve, and `policy.capabilities`
+  is read with an own-property check. Every `Object.prototype` member name is
+  covered by an end-to-end deny test. Affected by the original bypass: 0.1.0 of
+  the unscoped `andbox` and `@johnhenry/andbox` 0.0.0.
+- **`createNetworkFetch()` redirect handling is covered by tests against real
+  redirecting servers (verifies [#6](https://github.com/johnhenry/andbox/issues/6)).**
+  Fixed in 0.0.1 (`redirect: 'manual'`, every 3xx rejected, a caller-supplied
+  `redirect: 'follow'` cannot re-enable following). New tests confirm the redirect
+  target is never contacted. Affected before 0.0.1: allowlisted hosts could bounce
+  a request to a non-allowlisted host (SSRF).
+- **Unguessable correlation ids plus a per-evaluate nonce
+  ([#9](https://github.com/johnhenry/andbox/issues/9)).** Evaluate and capability
+  rpc ids are `crypto.randomUUID()`; each `evaluate` also carries a nonce that the
+  worker echoes in its `result`, and the host drops a result whose nonce does not
+  match. Impact was low (concurrent evaluates on one sandbox could previously
+  cross-talk by guessing sequential ids).
+
 ## 0.0.8
 
 - **New: `mode: 'wasm'`.** Runs the evaluated code in QuickJS-ng compiled to

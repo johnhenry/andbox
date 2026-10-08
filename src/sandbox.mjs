@@ -436,7 +436,7 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
   }
 
   // Gate capabilities with rate limits
-  const { gated: gatedCaps, stats: gateStats } = gateCapabilities(capabilities, policy);
+  const { lookup: lookupCapability, stats: gateStats } = gateCapabilities(capabilities, policy);
 
   // Console handler — mutable so evaluate() can swap per-call
   let activeConsoleHandler = onConsole || null;
@@ -490,7 +490,7 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
 
         case 'result': {
           const entry = pending.get(msg.id);
-          if (entry) {
+          if (entry && entry.nonce === msg.nonce) {
             pending.delete(msg.id);
             if (entry.timer) clearTimeout(entry.timer);
             if (msg.stats) {
@@ -570,7 +570,7 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
   }
 
   async function handleCapabilityCall(rpcId, name, args) {
-    const fn = gatedCaps[name];
+    const fn = lookupCapability(name);
     if (!fn) {
       worker.postMessage({
         type: 'capabilityResult',
@@ -637,6 +637,10 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
     // can't guess the id of a concurrent evaluate() on the same worker and
     // forge a matching message to interfere with it.
     const id = crypto.randomUUID();
+    // Per-call nonce: the worker echoes it in its `result`; a result whose
+    // nonce does not match is dropped. Held only by the host and the worker's
+    // message handler, never exposed to evaluated code.
+    const nonce = crypto.randomUUID() + crypto.randomUUID();
     const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs;
     const { promise, resolve, reject } = makeDeferred();
 
@@ -691,8 +695,8 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
       }, { once: true });
     }
 
-    pending.set(id, { resolve, reject, timer });
-    worker.postMessage({ type: 'evaluate', id, code, ...(wasmLimits ? { limits: wasmLimits } : {}) });
+    pending.set(id, { resolve, reject, timer, nonce });
+    worker.postMessage({ type: 'evaluate', id, nonce, code, ...(wasmLimits ? { limits: wasmLimits } : {}) });
 
     // Restore console handler when evaluation completes
     return promise.finally(() => {
