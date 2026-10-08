@@ -446,6 +446,8 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
   let disposed = false;
   let worker = null;
   let workerBlobURL = null;
+  // Lifetime of the current Worker; aborted when it is terminated.
+  let workerAbort = null;
 
   // `unref`: the thread only keeps the host process alive while work is in
   // flight (startup, evaluate, defineModule); idle, it lets the process exit.
@@ -467,6 +469,7 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
   // ── Worker lifecycle ──
 
   function createWorker() {
+    workerAbort = new AbortController();
     const source = isWasm ? makeWasmWorkerSource() : makeWorkerSource();
     if (workerFactory) {
       worker = workerFactory(source);
@@ -570,30 +573,45 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
   }
 
   async function handleCapabilityCall(rpcId, name, args) {
+    // Bind to the worker that made the call. If it is killed (timeout, abort,
+    // dispose, crash) while the capability is still running, the late result
+    // must be dropped: `worker` is then null or a *different* replacement
+    // thread that never asked for it (andbox#30).
+    const callerWorker = worker;
+    const callerSignal = workerAbort?.signal;
+    if (!callerWorker || !callerSignal) return;
+    const reply = (payload) => {
+      if (worker !== callerWorker || callerSignal.aborted) return;
+      try {
+        callerWorker.postMessage({ type: 'capabilityResult', id: rpcId, ...payload });
+      } catch {
+        // the thread went away between the check and the post: nothing to tell
+      }
+    };
+
     const fn = lookupCapability(name);
     if (!fn) {
-      worker.postMessage({
-        type: 'capabilityResult',
-        id: rpcId,
-        success: false,
-        error: `Unknown capability: ${name}`,
-      });
+      reply({ success: false, error: `Unknown capability: ${name}` });
       return;
     }
     try {
-      const value = await fn(...args);
-      worker.postMessage({ type: 'capabilityResult', id: rpcId, success: true, value });
+      // The signal travels as `this`, not as an argument, so capabilities
+      // with their own arity (Math.max, rest params, ...) are unaffected.
+      // It aborts when this Worker is terminated (andbox#8).
+      const value = await fn.call({ signal: callerSignal, name }, ...args);
+      reply({ success: true, value });
     } catch (e) {
-      worker.postMessage({
-        type: 'capabilityResult',
-        id: rpcId,
-        success: false,
-        error: e.message || String(e),
-      });
+      reply({ success: false, error: e?.message || String(e) });
     }
   }
 
   function terminateWorker() {
+    if (workerAbort) {
+      // Tell in-flight capability calls their caller is gone so cooperative
+      // ones can cancel the underlying effect (andbox#8).
+      workerAbort.abort(new Error('Sandbox worker terminated'));
+      workerAbort = null;
+    }
     if (worker) {
       worker.terminate();
       worker = null;
