@@ -316,6 +316,22 @@ const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'inline', 'data-uri', 
  * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
  */
 export function createSandbox(options = {}) {
+  if (options.untrusted === true) {
+    // Convenience for untrusted code: always the WebAssembly engine, never a
+    // silent downgrade to a Worker (andbox#10).
+    if (options.mode !== undefined && options.mode !== 'wasm') {
+      throw new Error(
+        `createSandbox({ untrusted: true }) requires mode: 'wasm' (got '${String(options.mode)}'); ` +
+        'worker and inline modes are not a boundary for untrusted code.'
+      );
+    }
+    return Promise.resolve(createSandbox({ ...options, untrusted: false, mode: 'wasm' })).catch((err) => {
+      throw new Error(
+        `createSandbox({ untrusted: true }) needs mode: 'wasm', which is unavailable here: ${err?.message ?? err}`,
+        { cause: err }
+      );
+    });
+  }
   const mode = options.mode ?? 'worker';
   if (!SUPPORTED_MODES.includes(mode)) {
     throw new Error(
@@ -402,13 +418,15 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
     onConsole,
     nodeWorker,
     unref = false,
-    allowedImportHosts = [],
+    allowedImportHosts,
   } = options;
 
-  if (!Array.isArray(allowedImportHosts) || !allowedImportHosts.every((h) => typeof h === 'string')) {
+  // undefined = unset: remote imports allowed. An array (even empty) restricts.
+  if (allowedImportHosts !== undefined &&
+      (!Array.isArray(allowedImportHosts) || !allowedImportHosts.every((h) => typeof h === 'string'))) {
     throw new TypeError('allowedImportHosts must be an array of hostname strings');
   }
-  const importHosts = allowedImportHosts.map((h) => h.toLowerCase());
+  const importHosts = allowedImportHosts === undefined ? null : allowedImportHosts.map((h) => h.toLowerCase());
 
   // Node mode: no global Worker (and no blob: worker URLs) -> node:worker_threads.
   // An explicit workerFactory always wins; 'node-worker' forces Node; the

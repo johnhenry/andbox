@@ -441,3 +441,33 @@ describe('wasm mode: parity with worker mode', () => {
     }
   });
 });
+
+describe("createSandbox({ untrusted: true })", () => {
+  it("selects mode: 'wasm' (no ambient fetch, virtual modules only)", async () => {
+    const sb = await createSandbox({ untrusted: true });
+    open.push(sb);
+    assert.equal(await sb.evaluate('return typeof fetch + typeof process'), 'undefinedundefined');
+    assert.equal(await sb.evaluate('return 1 + 1'), 2);
+  });
+
+  it("accepts an explicit mode: 'wasm' and untrusted: false is a no-op", async () => {
+    const a = await createSandbox({ untrusted: true, mode: 'wasm' });
+    open.push(a);
+    const b = await createSandbox({ untrusted: false });
+    open.push(b);
+    assert.equal(await b.evaluate('return typeof process'), 'object');
+  });
+
+  it('throws when combined with a weaker mode', () => {
+    for (const mode of ['worker', 'node-worker', 'inline', 'data-uri', 'service-worker']) {
+      assert.throws(() => createSandbox({ untrusted: true, mode }), /untrusted.*wasm/);
+    }
+  });
+
+  it('rejects when wasm mode is unavailable, never falling back', async () => {
+    await assert.rejects(
+      () => createSandbox({ untrusted: true, engineURL: 'file:///nonexistent/engine.mjs', wasmURL: 'file:///nonexistent/q.wasm' }),
+      /untrusted: true.*wasm|wasm/i,
+    );
+  });
+});

