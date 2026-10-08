@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.1
+
+- **Behaviour change: remote imports allowed by default again; pass
+  `allowedImportHosts: []` to deny.** `sandboxImport()` of `http(s)` (and
+  protocol-relative) specifiers is unrestricted when `allowedImportHosts` is
+  not provided (reverting the 0.1.0 default, [#7](https://github.com/johnhenry/andbox/issues/7)).
+  When it is provided, only the listed hosts plus `baseURL`'s host pass, and an
+  empty list denies all.
+- **New: `createSandbox({ untrusted: true })`** selects `mode: 'wasm'`; it
+  throws if combined with another `mode` and rejects instead of falling back
+  if wasm mode is unavailable.
+- **Docs:** README "Security model" now recommends `mode: 'wasm'` for untrusted
+  code and lists what remains reachable in `worker`/`node-worker`
+  ([#10](https://github.com/johnhenry/andbox/issues/10)).
+
 ## 0.1.0
 
 Minor release because two fixes change behaviour (remote `sandboxImport()` is

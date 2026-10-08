@@ -32,7 +32,7 @@ export function makeWorkerSource() {
 // ── State ──
 let importMap = { imports: {}, scopes: {} };
 let baseURL = 'https://andbox.local/';
-let allowedImportHosts = [];
+let allowedImportHosts = null; // null = unset: remote imports allowed
 const virtualModules = new Map();
 // Node mode only: the adapter provides a loader that lets virtual modules
 // import each other. Captured once and removed from the global scope.
@@ -65,6 +65,7 @@ const SHADOWED = [...LOCKED_GLOBALS, 'window'];
 
 // ── Remote import policy (andbox#7) ──
 function assertImportAllowed(href) {
+  if (allowedImportHosts === null) return;
   let u;
   try { u = new URL(href); } catch { return; }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return;

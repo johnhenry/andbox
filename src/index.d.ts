@@ -399,11 +399,18 @@ export interface SandboxOptions {
   unref?: boolean;
   /**
    * Hostnames `sandboxImport()` may load remote http(s) modules from, in
-   * addition to the host of `baseURL`. Default `[]`: remote imports are
-   * refused. Import-map targets and virtual modules are not affected. Does
-   * not restrict the platform `import()` operator in worker mode.
+   * addition to the host of `baseURL`. Unset (default): remote imports are
+   * allowed. Provided: only these hosts; `[]` denies all remote imports.
+   * Import-map targets and virtual modules are not affected. Does not
+   * restrict the platform `import()` operator in worker mode.
    */
   allowedImportHosts?: string[];
+  /**
+   * Convenience for untrusted code: selects `mode: 'wasm'`. Throws if `mode`
+   * is set to anything else; rejects (never falls back to a Worker) when
+   * wasm mode is unavailable.
+   */
+  untrusted?: boolean;
 }
 
 /** Options for the built-in Node worker_threads mode (`nodeWorker`). */
