@@ -49,7 +49,7 @@ export function gateCapabilities(capabilities, policy = {}) {
   for (const [name, fn] of Object.entries(capabilities)) {
     const capLimits = { ...DEFAULT_CAPABILITY_LIMITS, ...(hasOwn(capPolicies, name) ? capPolicies[name] : undefined) };
 
-    gated[name] = async (...args) => {
+    gated[name] = async function (...args) {
       // Measure argument bytes
       const argStr = JSON.stringify(args);
       const argBytes = new TextEncoder().encode(argStr).byteLength;
@@ -82,7 +82,7 @@ export function gateCapabilities(capabilities, policy = {}) {
       concurrent++;
 
       try {
-        return await fn(...args);
+        return await fn.apply(this, args);
       } finally {
         concurrent--;
       }

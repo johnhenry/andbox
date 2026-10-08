@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.0.10
+
+### Security
+
+- **Capability calls get an `AbortSignal` tied to the Worker's lifetime
+  ([#8](https://github.com/johnhenry/andbox/issues/8)).** Capabilities are
+  invoked with `this = { signal, name }`; the signal aborts when the Worker is
+  terminated by a timeout, an aborted `evaluate()`, `dispose()` or a crash.
+  Previously a script could start a slow, effectful capability just before its
+  timeout and the host-side effect completed regardless, after the caller had
+  been told the call timed out. Cancellation is cooperative (a capability that
+  ignores the signal still runs); the signal is passed as `this`, not as an
+  argument, so existing capabilities are unaffected. Affected: all earlier
+  versions. Not covered: `mode: 'wasm'` cooperative deadlines (the Worker
+  survives them).
+
+### Fixed
+
+- **A capability finishing after its Worker is gone no longer throws
+  ([#30](https://github.com/johnhenry/andbox/issues/30)).** The late result
+  (success or failure) is dropped instead of dereferencing a null `worker`
+  (uncaught in Node, unhandled rejection in browsers), and it is no longer
+  posted into a replacement Worker that never asked for it.
+
 ## 0.0.9
 
 ### Security

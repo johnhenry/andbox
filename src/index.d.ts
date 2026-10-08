@@ -310,12 +310,23 @@ export interface EvaluateOptions {
   deadlineMs?: number;
 }
 
+/**
+ * `this` inside a capability function (use a `function`, not an arrow).
+ * `signal` aborts when the sandbox's Worker is terminated (timeout, an
+ * aborted `evaluate()`, `dispose()`, crash); cooperative capabilities should
+ * pass it to whatever they are doing (`fetch(url, { signal })`, ...).
+ */
+export interface CapabilityContext {
+  signal: AbortSignal;
+  name: string;
+}
+
 /** Options for createSandbox(). */
 export interface SandboxOptions {
   /** Import map for module resolution inside the sandbox. */
   importMap?: ImportMap;
   /** Host functions callable from sandbox code via host.call(name, ...args). */
-  capabilities?: Record<string, (...args: any[]) => any>;
+  capabilities?: Record<string, (this: CapabilityContext, ...args: any[]) => any>;
   /** Default timeout in milliseconds for evaluate() calls. */
   defaultTimeoutMs?: number;
   /** Base URL for resolving relative imports inside the sandbox. */
