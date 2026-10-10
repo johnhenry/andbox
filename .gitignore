@@ -1,2 +1,4 @@
 node_modules/
 examples/08-wasm-browser/public/
+test-results/
+playwright-report/

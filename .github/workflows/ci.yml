@@ -18,6 +18,8 @@ jobs:
       gate-commands: |
         npm test
         npm run examples
+        npx playwright install --with-deps chromium firefox webkit
+        npm run test:browser
 
   workflow-lint:
     uses: johnhenry/workflows/.github/workflows/workflow-lint.yml@v1
