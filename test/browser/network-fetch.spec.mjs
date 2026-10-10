@@ -3,6 +3,8 @@
 //
 // The host page is test/browser/fixture.html on 127.0.0.1; `fetch` inside the
 // sandbox is andbox's shim, which sends each request to the host function.
+// `network.allowedHosts` is required (#43); tests that only exercise the shim
+// pass '*' with a recording host fetch.
 import { test, expect } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
@@ -61,7 +63,7 @@ for (const mode of ['worker', 'iframe']) {
     test('a library calling the global fetch goes through the host function, which sees every request', async ({ page }) => {
       const r = await host(page, mode, async (make, recorder, lib) => {
         const { seen, hostFetch } = recorder();
-        const sb = await make({ network: { fetch: hostFetch } });
+        const sb = await make({ network: { allowedHosts: '*', fetch: hostFetch } });
         await sb.defineModule('lib', lib);
         const value = await sb.evaluate(`
           const { getJSON } = await sandboxImport('lib');
@@ -86,7 +88,7 @@ for (const mode of ['worker', 'iframe']) {
     test('non-http(s) URLs are refused and credentials cannot be forced', async ({ page }) => {
       const r = await host(page, mode, async (make, recorder) => {
         const { seen, hostFetch } = recorder();
-        const sb = await make({ network: { fetch: hostFetch } });
+        const sb = await make({ network: { allowedHosts: '*', fetch: hostFetch } });
         const refused = await sb.evaluate(`
           const out = [];
           for (const u of ['data:text/plain,hi', 'blob:null/x', 'file:///etc/passwd', 'javascript:1']) {
@@ -116,7 +118,7 @@ for (const mode of ['worker', 'iframe']) {
         const name = await sb.evaluate(`return (await (await fetch('${origin}/package.json')).json()).name`);
         const denied = await sb.evaluate(`try { await fetch('${origin.replace('127.0.0.1', 'localhost')}/package.json') } catch (e) { return e.message }`);
         // The page's own fetch can be passed directly (no "Illegal invocation").
-        const direct = await make({ network: { fetch } });
+        const direct = await make({ network: { allowedHosts: '*', fetch } });
         const version = await direct.evaluate(`return (await (await fetch('${origin}/package.json')).json()).version`);
         return { name, denied, version };
       });
@@ -124,12 +126,67 @@ for (const mode of ['worker', 'iframe']) {
       expect(r.denied).toMatch(/localhost is not in the allowlist/);
       expect(r.version).toMatch(/^\d+\.\d+\.\d+/);
     });
+
+    test('network without allowedHosts is refused before a sandbox starts (#43)', async ({ page }) => {
+      const r = await host(page, mode, async (make, recorder) => {
+        const { seen, hostFetch } = recorder();
+        let message = 'created';
+        try {
+          await make({ network: { fetch: hostFetch } });
+        } catch (e) {
+          message = e.message;
+        }
+        return { message, frames: document.querySelectorAll('iframe').length, seen: seen.length };
+      });
+      expect(r.message).toMatch(/network\.allowedHosts is required/);
+      expect(r.message).toContain("allowedHosts: '*'");
+      expect(r.frames).toBe(0);
+      expect(r.seen).toBe(0);
+    });
+
+    test('allowedHosts as a function is asked per request, so the allowlist can change at runtime (#43)', async ({ page }) => {
+      const r = await host(page, mode, async (make) => {
+        const allowed = new Set(['127.0.0.1']);
+        const asked = [];
+        const sb = await make({ network: { allowedHosts: (url) => { asked.push(url.host); return allowed.has(url.hostname); } } });
+        const origin = location.origin;
+        const other = origin.replace('127.0.0.1', 'localhost');
+        const get = `async (u) => { try { return (await (await fetch(u)).json()).name } catch (e) { return e.message } }`;
+        const first = await sb.evaluate(`return (${get})('${origin}/package.json')`);
+        const before = await sb.evaluate(`return (${get})('${other}/package.json')`);
+        allowed.add('localhost');
+        const after = await sb.evaluate(`return (${get})('${other}/package.json')`);
+        return { first, before, after, asked: asked.length };
+      });
+      expect(r.first).toBe('@johnhenry/andbox');
+      expect(r.before).toMatch(/localhost:\d+ is not allowed by network\.allowedHosts/);
+      expect(r.after).toBe('@johnhenry/andbox');
+      expect(r.asked).toBe(3);
+    });
+
+    test("redirects: refused for a list, fail closed for a function over the browser's fetch, the caller's choice for '*' (#43)", async ({ page }) => {
+      const r = await host(page, mode, async (make) => {
+        const url = `${location.origin}/__redirect?to=/package.json`;
+        const run = async (network) => {
+          const sb = await make({ network });
+          return sb.evaluate(`try { const res = await fetch('${url}'); return [res.redirected, (await res.json()).name] } catch (e) { return e.message }`);
+        };
+        return {
+          list: await run({ allowedHosts: ['127.0.0.1'] }),
+          fn: await run({ allowedHosts: () => true }),
+          any: await run({ allowedHosts: '*', fetch }),
+        };
+      });
+      expect(r.list).toMatch(/redirects are not followed/);
+      expect(r.fn).toMatch(/hides, so network\.allowedHosts cannot check it/);
+      expect(r.any).toEqual([true, '@johnhenry/andbox']);
+    });
   });
 }
 
 test("worker mode: everything else stays locked with network on", async ({ page }) => {
   const r = await host(page, 'worker', async (make, recorder) => {
-    const sb = await make({ network: { fetch: recorder().hostFetch } });
+    const sb = await make({ network: { allowedHosts: '*', fetch: recorder().hostFetch } });
     return sb.evaluate(`return ['XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker', 'importScripts', 'indexedDB', 'caches', 'BroadcastChannel']
       .map((n) => typeof globalThis[n])`);
   });
@@ -139,7 +196,7 @@ test("worker mode: everything else stays locked with network on", async ({ page 
 test("iframe mode: the shim replaces the frame's fetch, so it works under csp connect-src 'none'", async ({ page }) => {
   const r = await host(page, 'iframe', async (make, recorder) => {
     const { seen, hostFetch } = recorder();
-    const sb = await make({ network: { fetch: hostFetch }, csp: "connect-src 'none'" });
+    const sb = await make({ network: { allowedHosts: '*', fetch: hostFetch }, csp: "connect-src 'none'" });
     const value = await sb.evaluate("return (await fetch('https://api.example.com/c')).json()");
     // XHR is the frame's own and the CSP blocks it: network goes through the host or nowhere.
     const xhr = await sb.evaluate(`

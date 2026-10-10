@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.2.0 — `network` needs `allowedHosts` (2026-10-10)
+
+**Upgrade from `0.1.3` if you use the `network` option.** Since 0.1.3,
+`createSandbox({ network: { fetch } })` let the sandbox reach every host your
+`fetch` function would fetch: setting `network` meant network access by
+default. From 0.2.0 `network.allowedHosts` is required, so the sandbox has no
+network unless you say which hosts it may reach. Nothing changes if you do
+not use `network`. See [#43](https://github.com/johnhenry/andbox/issues/43); landed in 9e5c3bd ([#45](https://github.com/johnhenry/andbox/pull/45)).
+
+### Can I keep `network: { fetch }` alone? No.
+
+`createSandbox()` throws `network.allowedHosts is required` (synchronously,
+before any Worker or frame starts) and the message shows the three forms. Add
+one of them:
+
+- `allowedHosts: ['api.example.com']` if you know the hosts,
+- `allowedHosts: (url) => myPolicy.allows(url)` if the list changes while the
+  sandbox runs (asked for every request and every redirect hop),
+- `allowedHosts: '*'` if your `fetch` function already enforces its own
+  policy; it then stays the whole policy, exactly as in 0.1.3.
+
+`network: { fetch, allowedHosts: '*' }` behaves exactly like 0.1.3's
+`network: { fetch }`.
+
+### Can I keep `network: { allowedHosts: [...] }` as it is? Yes, mostly.
+
+A list keeps 0.1.3's matching (exact hostname, any port, no subdomains) and
+still refuses every redirect. New: entries are validated and normalised, so a
+list containing an entry that could never match now throws instead of
+silently denying, e.g. `'https://api.example.com'`, `'api.example.com:8080'`,
+`'*.example.com'`, `'::1'` (write `'[::1]'`) or `['*']` (write `'*'`). IDN
+entries are converted to punycode, so `'bücher.example'` now matches.
+
+### What is new
+
+- **`allowedHosts` is required and checked on the host before your `fetch` is
+  called.** It is one of: a non-empty list of hostnames; a function
+  `(url: URL) => boolean | Promise<boolean>`, asked with a fresh `URL` for
+  every request, so an app can change its allowlist at runtime (only `true`
+  allows; a thrown error becomes the sandbox's rejection message); or the
+  explicit opt-in `'*'` for any http(s) host. `fetch` stays optional and
+  defaults to the platform's `fetch` behind the policy. See #43.
+- **Redirects, per form.** A list refuses any redirect (unchanged). A function
+  policy has andbox follow redirects itself with `redirect: 'manual'`, asking
+  the function about each `Location` before requesting it (at most 20 hops,
+  Fetch-standard method/body rewriting, `Authorization` dropped on a
+  cross-origin hop); where the platform hides the target (a browser's
+  `opaqueredirect`), the request fails instead of following blindly. `'*'`
+  passes the sandbox's `redirect` mode to your `fetch`, which decides. See #43.
+- **Types:** `SandboxNetworkOptions.allowedHosts` is required and typed as
+  `readonly string[] | '*' | SandboxHostPolicy`.
+- **Tests:** `test/network-fetch.test.mjs` covers the required option, the
+  three forms (including a function re-evaluated per request), entry
+  validation, and redirect handling against mocks and a real server;
+  `test/browser/network-fetch.spec.mjs` adds the same for browser Workers and
+  iframe mode, including a real browser redirect (`test/browser/serve.mjs`
+  gained `/__redirect`).
+- **Docs:** README "Mediated network" (forms, matching rules, redirects, the
+  server-side caution that a host function has the server's network
+  position), the options table and "Security model".
+- **Unchanged:** the standalone `createNetworkFetch()` still allows every host
+  when its list is missing or empty; tracked in
+  [#44](https://github.com/johnhenry/andbox/issues/44).
+
+
 ## 0.1.3
 
 - **New: `network` option, a host-backed global `fetch`** ([#39](https://github.com/johnhenry/andbox/issues/39)).

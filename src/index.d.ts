@@ -251,23 +251,46 @@ export interface SandboxFetchReply {
   redirected?: boolean;
 }
 
+/**
+ * `network.allowedHosts` as a function: asked on the host, with a fresh `URL`,
+ * before every request the sandbox makes and before every redirect hop andbox
+ * follows. Only `true` (or a promise of `true`) allows; anything else refuses,
+ * and a thrown error is the message the sandbox's `fetch` rejects with.
+ */
+export type SandboxHostPolicy = (url: URL) => boolean | Promise<boolean>;
+
 /** `createSandbox({ network })`: a host-backed global `fetch` inside the sandbox. */
 export interface SandboxNetworkOptions {
   /**
-   * Called on the host for every request the sandbox's `fetch` makes, through
-   * the gated `fetch` capability (`policy.capabilities.fetch` applies). The
-   * URL is always absolute http(s). Return a `Response` or a plain reply.
-   * Called without a `this`, so the platform `fetch` itself can be passed.
-   * Required unless `allowedHosts` is given.
+   * Required (0.2.0, andbox#43): which hosts the sandbox may reach. Checked on
+   * the host before `fetch` is called, so leaving it out is an error rather
+   * than "every host".
+   *
+   * - `string[]`: hostnames, matched exactly against the request URL's
+   *   hostname (case-insensitive, IDN and IPv4 normalised like `URL`, any
+   *   port, http or https). No subdomain matching: `'example.com'` does not
+   *   allow `'api.example.com'`. IPv6 in brackets (`'[::1]'`). Entries with a
+   *   scheme, port, path or `*` throw. Must not be empty. Any redirect is
+   *   refused (the request is made with `redirect: 'manual'`).
+   * - `(url: URL) => boolean | Promise<boolean>`: a policy asked for every
+   *   request, so the allowlist can change while the sandbox runs. andbox
+   *   follows redirects itself (`redirect: 'manual'` underneath) and asks it
+   *   again for each hop; where the platform hides the target (a browser's
+   *   opaque redirect) the request fails.
+   * - `'*'`: any http(s) host. Your `fetch` is the whole policy, and the
+   *   sandbox's redirect mode is passed to it unchanged.
+   */
+  allowedHosts: readonly string[] | '*' | SandboxHostPolicy;
+  /**
+   * Called on the host for every request the sandbox's `fetch` makes that
+   * `allowedHosts` allows, through the gated `fetch` capability
+   * (`policy.capabilities.fetch` applies). The URL is always absolute
+   * http(s). Return a `Response` or a plain reply. Called without a `this`,
+   * so the platform `fetch` itself can be passed. Default: the platform's
+   * global `fetch` (on a server, that has the server's network position).
    */
   fetch?: (url: string, init: SandboxFetchInit) =>
     Response | SandboxFetchReply | Promise<Response | SandboxFetchReply>;
-  /**
-   * Put `createNetworkFetch(allowedHosts, fetch)` in front: other hosts and
-   * any redirect are refused. Without `fetch` it wraps the host's global
-   * `fetch`. Must not be empty.
-   */
-  allowedHosts?: string[];
   /** `init.credentials` for every request. Default `'omit'`. */
   credentials?: RequestCredentials;
 }
@@ -475,7 +498,8 @@ export interface SandboxOptions {
    * `worker`, `node-worker` and `iframe` modes (throws in `wasm`): install a
    * global `fetch` in the sandbox that sends each request to `network.fetch`
    * on the host, through the gated `fetch` capability (andbox#39). http(s)
-   * only; `credentials` is the host's choice. Other network globals stay
+   * only, and only to the hosts `network.allowedHosts` allows (required,
+   * andbox#43); `credentials` is the host's choice. Other network globals stay
    * locked in worker modes; the platform `import()` operator is not affected.
    * Unset (default): worker modes have no `fetch`. Conflicts with a
    * capability named `fetch`.
