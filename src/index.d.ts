@@ -341,7 +341,8 @@ export interface SandboxOptions {
    * `Worker`. `'node-worker'` forces the Node implementation.
    */
   mode?: 'worker' | 'node-worker' | 'wasm';
-  // Any other value throws: supported modes are 'worker', 'node-worker', 'wasm', 'inline', 'data-uri', 'service-worker'.
+  // Any other value throws: supported modes are 'worker', 'node-worker', 'wasm', 'iframe', 'inline', 'data-uri', 'service-worker'.
+  // 'iframe' takes IframeSandboxOptions (below).
   /**
    * `mode: 'wasm'` only. URL of an ES module built from
    * `@johnhenry/andbox/wasm-engine` (the QuickJS engine entry), served from
@@ -523,6 +524,64 @@ export interface Sandbox {
   isDisposed(): boolean;
 }
 
+/**
+ * Options for `createSandbox({ mode: 'iframe' })`: a sandboxed
+ * `<iframe sandbox="allow-scripts" srcdoc>` with an opaque origin, its own
+ * realm, `window` and `document`. Browser only (rejects without a DOM).
+ * All the Worker-mode options apply except `workerFactory`, `nodeWorker`,
+ * `unref` and the `mode: 'wasm'` limits.
+ */
+export interface IframeSandboxOptions
+  extends Omit<SandboxOptions, 'mode' | 'workerFactory' | 'nodeWorker' | 'unref' | 'untrusted' | 'engineURL' | 'wasmURL' | 'fuel' | 'memoryBytes' | 'stackBytes' | 'deadlineMs'> {
+  /** Mode discriminant. */
+  mode: 'iframe';
+  /**
+   * Element each frame is appended to. Default: `document.body`, placed
+   * offscreen (1x1 px at -10000px, `aria-hidden`) for evaluation-only use.
+   * A restarted frame takes its predecessor's place and attributes instead.
+   */
+  container?: Element;
+  /** Initial `<body>` markup of every new frame (also after a restart). Subject to `csp`. */
+  html?: string;
+  /**
+   * Content-Security-Policy injected as a `<meta http-equiv>` after andbox's
+   * bootstrap. evaluate() compiles code with `new Function`, so a policy that
+   * restricts scripts must allow `'unsafe-eval'` (and `blob:` for
+   * `defineModule()` modules, plus any hosts you `sandboxImport()` from).
+   */
+  csp?: string;
+  /**
+   * Extra sandbox tokens, e.g. `['allow-forms', 'allow-popups']`.
+   * `allow-scripts` is always set. `'allow-same-origin'` is refused unless
+   * `dangerouslyAllowSameOrigin` is true.
+   */
+  iframeSandbox?: string[];
+  /**
+   * Permit `'allow-same-origin'` in `iframeSandbox`. Together with
+   * `allow-scripts` that removes the boundary entirely: the frame runs in your
+   * origin and can reach your page, cookies and storage, and un-sandbox itself.
+   */
+  dangerouslyAllowSameOrigin?: boolean;
+  /**
+   * Called synchronously with every new frame (the first and each one created
+   * by a timeout/abort/unload restart) before andbox attaches it. Style it,
+   * set attributes such as `allow`, or insert it yourself; if it is still
+   * detached when this returns, andbox attaches it.
+   */
+  onFrame?: (iframe: HTMLIFrameElement) => void;
+}
+
+/** A sandbox created with `mode: 'iframe'`. */
+export interface IframeSandbox extends Sandbox {
+  /**
+   * The live frame element. It is replaced by a new element after a timeout,
+   * an abort, or the frame navigating/reloading (use `onFrame` to follow
+   * replacements), and is `null` after dispose(). Do not move it in the DOM:
+   * that reloads the document and loses the sandbox state.
+   */
+  readonly iframe: HTMLIFrameElement | null;
+}
+
 /** Options for createSandbox({ mode: 'service-worker' }). */
 export interface ServiceWorkerSandboxOptions {
   /** Mode discriminant. */
@@ -582,6 +641,9 @@ export interface ServiceWorkerSandbox {
  * - Console forwarding
  * - Capability gating with rate limits
  *
+ * `mode: 'iframe'` runs the code in a sandboxed, opaque-origin `<iframe>`
+ * with a real DOM, and adds `iframe` to the returned object.
+ *
  * `mode: 'service-worker'` is a different shape entirely: it hosts a
  * path → content map behind a real, same-origin, HTTP-shaped scope
  * instead of evaluating code — see andbox#14 and README's Security model
@@ -590,6 +652,7 @@ export interface ServiceWorkerSandbox {
  * @param options  Sandbox configuration options.
  * @returns A promise that resolves to the sandbox instance.
  */
+export declare function createSandbox(options: IframeSandboxOptions): Promise<IframeSandbox>;
 export declare function createSandbox(options?: SandboxOptions): Promise<Sandbox>;
 export declare function createSandbox(
   options: ServiceWorkerSandboxOptions,

@@ -209,7 +209,7 @@ describe('createSandbox — mode validation', () => {
     assert.throws(
       () => createSandbox({ mode: 'wroker' }),
       (e) => /Unknown sandbox mode 'wroker'/.test(e.message)
-        && ['worker', 'node-worker', 'inline', 'data-uri', 'service-worker'].every((m) => e.message.includes(m)),
+        && ['worker', 'node-worker', 'wasm', 'iframe', 'inline', 'data-uri', 'service-worker'].every((m) => e.message.includes(m)),
     );
     assert.throws(() => createSandbox({ mode: '' }), /Unknown sandbox mode/);
   });

@@ -25,14 +25,21 @@ modes that excludes.
    `examples/README.md`); each is self-verifying and exits non-zero on
    failure. Example 06 (`service-worker` mode) is deliberately excluded --
    it needs a real browser and is not part of this script or CI.
-3. A genuinely fresh clone:
+3. `npm run test:browser` -- Playwright (`playwright.config.mjs`,
+   `test/browser/*.spec.mjs`) in Chromium, Firefox and WebKit; the only
+   automated coverage of `mode: 'iframe'`, which needs a real DOM. First run:
+   `npx playwright install chromium firefox webkit`. The suite serves the repo
+   with `test/browser/serve.mjs` on port 47391 (`ANDBOX_TEST_PORT` overrides).
+   `npm run example:09:headless` runs the iframe demo the same way.
+4. A genuinely fresh clone:
    `git clone . /tmp/andbox-verifyN && cd $_ && npm ci && npm test`.
    This is the only way to catch "works on my checked-out tree" bugs
    (missing files in `package.json`'s `files`, undeclared deps).
-4. Commit, push, close the issue with a comment naming the commit SHA.
+5. Commit, push, close the issue with a comment naming the commit SHA.
 
-CI (`.github/workflows/ci.yml`) runs `npm ci` then `npm test`; match it
-locally.
+CI (`.github/workflows/ci.yml`) runs `npm install`, `npm test`,
+`npm run examples`, then installs the Playwright browsers and runs
+`npm run test:browser`; match it locally.
 
 ## Repo-specific gotchas
 
@@ -68,6 +75,18 @@ locally.
   engine's `WebAssembly.Memory` exist; do not "simplify" them away. Stack caps
   above ~192 KiB overflow the *host* stack in a Chrome Worker.
   `examples/08-wasm-browser/run-headless.mjs` is the only real-browser check.
+
+- **`mode: 'iframe'` must not register `pagehide`/`unload` listeners in the
+  frame.** In Chromium they are sudden-termination disablers: the browser
+  then waits for the handler before shutting the frame's process down, so a
+  frame killed mid `while (true) {}` kept its (shared, per-site) renderer
+  hung for seconds and the replacement frame's startup timed out. Navigation
+  is detected on the host side from the element's second `load` event
+  instead (`src/iframe-host.mjs`; `test/iframe-mode.test.mjs` asserts the
+  srcdoc has no such listener). Chrome also groups all sandboxed frames of a
+  site into one process: a looping frame can only be killed when no other
+  sandboxed frame of the site is alive, which is why the sync-loop browser
+  test disposes its probe sandbox first.
 
 ## Definition of done
 

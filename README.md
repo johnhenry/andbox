@@ -21,6 +21,7 @@ Zero dependencies. Uses only Web Workers and standard browser APIs.
 - [Sandbox Modes](#sandbox-modes)
 - [Node](#node)
 - [`mode: 'wasm'`](#mode-wasm)
+- [`mode: 'iframe'`](#mode-iframe)
 - [API](#api)
 - [Execution model](#execution-model)
 - [Security model](#security-model)
@@ -88,11 +89,12 @@ await sandbox.dispose();
 
 ## Sandbox Modes
 
-andbox supports six execution modes (any other `mode` throws an error listing these):
+andbox supports seven execution modes (any other `mode` throws an error listing these):
 
 - **`worker`** (default) -- Runs in a dedicated Worker with an RPC bridge, import maps, virtual modules, and hard-kill timeout semantics. See [Security model](#security-model) for what this does and doesn't protect against.
 - **`node-worker`** -- The `worker` mode on `node:worker_threads`. Selected automatically under Node when there is no global `Worker`; see [Node](#node).
 - **`wasm`** -- Optional. Runs the code in QuickJS-ng compiled to WebAssembly *inside* the Worker (or worker thread), with `host.call` as the only authority and real memory, stack, fuel and deadline limits. The only mode that withholds the Worker's own globals (`fetch`, `WebSocket`, `importScripts`, ...). See [`mode: 'wasm'`](#mode-wasm).
+- **`iframe`** -- Browser only. Runs the code in a sandboxed `<iframe sandbox="allow-scripts" srcdoc>`: an opaque origin with its own realm, `window` and `document`, so the code can render real DOM (charts, canvas animations, HTML) that you mount in your page. Same API as `worker`. The first mode with a browser-enforced origin boundary; see [`mode: 'iframe'`](#mode-iframe) for what that does and does not cover.
 - **`inline`** -- Same-thread execution via AsyncFunction. Lighter weight, no Worker overhead, no isolation at all -- code runs with full access to the calling context. Only for code you already trust.
 - **`data-uri`** -- Dynamic `import()` via Blob URL (a `data:` URL under Node). Module-level separation without a Worker. Supports globals injection.
 - **`service-worker`** -- Not code execution at all: registers a Service Worker that serves an in-memory `path → content` map with real HTTP-shaped fetch/navigation semantics. For hosting a small virtual multi-file site (HTML/CSS/JS, arbitrary paths), not for running JS in isolation. See [andbox#14](https://github.com/johnhenry/andbox/issues/14) and [Security model](#security-model) -- this mode does **not** provide isolation by merely existing.
@@ -242,17 +244,64 @@ Or give them through the sandbox import map, so a page that already has one need
 - A guest can catch the engine's out-of-memory error and keep running inside the cap; it cannot exceed the cap.
 - `Date`, `Math.random` and `performance` exist in the guest (QuickJS provides them from the host clock); see the threat model.
 
+## `mode: 'iframe'`
+
+`mode: 'iframe'` (0.1.2) runs evaluated code in a sandboxed `<iframe>` instead of a Worker, for code that needs a real DOM: a notebook pane that draws a chart, plays a canvas animation, or renders HTML. It is the cross-origin-iframe option [andbox#10](https://github.com/johnhenry/andbox/issues/10) named next to `mode: 'wasm'`. The frame is created from `srcdoc` with `sandbox="allow-scripts"` and **no** `allow-same-origin`, so the browser gives it an opaque origin: it cannot read your page, your cookies or your storage.
+
+```js
+import { createSandbox } from '@johnhenry/andbox';
+
+const pane = await createSandbox({
+  mode: 'iframe',
+  container: document.querySelector('#pane'),    // where the frame goes (default: offscreen in <body>)
+  html: '<style>body { margin: 0 }</style>',      // initial body markup
+  capabilities: { data: () => [3, 7, 4, 9] },
+  onConsole: (level, ...args) => console.log(`[pane:${level}]`, ...args),
+  onFrame: (iframe) => { iframe.className = 'pane-frame'; }, // every new frame, before it is attached
+});
+
+await pane.evaluate(`
+  const canvas = document.createElement('canvas');   // the frame's own document
+  document.body.append(canvas);
+  const values = await host.call('data');
+  // ... draw, animate, play(Scene, { canvas }) ...
+  return values.length;
+`);
+
+pane.iframe.style.height = '300px'; // the live element; size it like any other
+```
+
+**Same contract as worker mode.** `evaluate(code, opts)` wraps the code in an async IIFE and resolves with what it `return`s, by structured clone (`Map`, `Date`, typed arrays survive; a DOM node rejects with `DataCloneError`). `host.call(name, ...args)` goes through the same capability gate and `policy`, and capabilities get the same `this.signal`. `sandboxImport()` resolves virtual modules (`defineModule()`), the `importMap`, and remote URLs under the same `allowedImportHosts` rules. `console.*` is forwarded to `onConsole` (sandbox-level or per call). `timeoutMs`/`defaultTimeoutMs` and an `AbortSignal` hard-kill the frame (it is removed and a fresh one created) and reject with the same `TimeoutError` / `AbortError` as worker mode. `stats()`, `dispose()` and `isDisposed()` are unchanged.
+
+**Differences from worker mode.**
+
+- **The code has a full browser window.** `window`, `document`, `fetch`, timers and `requestAnimationFrame` are the frame's own; nothing is deleted or shadowed (the worker-mode lockdown does not apply, the origin boundary does). `document.body.append(...)` renders where you mounted the frame.
+- **`sandbox.iframe` is the live element, and it changes.** A timeout, an abort, or the frame navigating/reloading itself replaces it with a new element in the same place, with the same attributes (`class`, `style`, `width`, ...); everything the old document held is gone. `onFrame(iframe)` is called for every new frame before it is attached, so set things up there if you need them on every frame, or insert the frame yourself there. `sandbox.iframe` is `null` after `dispose()`.
+- **Do not move the element in the DOM.** Re-parenting an iframe reloads its document. andbox notices (the pending call rejects with `Sandbox iframe unloaded ...`) and the next call gets a fresh frame, but state is lost. Pass `container` (or place it in `onFrame`) instead.
+- **Remote modules are cross-origin requests.** The frame's origin is `null`, so a module URL must be served with `Access-Control-Allow-Origin` (CDNs such as esm.sh do). A relative `sandboxImport('./x.js')` resolves against `baseURL` (default: your page URL) and needs the same header.
+- **`csp`** is injected as `<meta http-equiv="Content-Security-Policy">` after andbox's bootstrap script. `evaluate()` compiles code with `new Function`, so a policy that restricts scripts must allow `'unsafe-eval'`, plus `blob:` for `defineModule()` modules and the hosts you import from. Example: `"default-src 'none'; script-src 'unsafe-eval' blob: https://esm.sh; img-src data:"` leaves the frame no network except module imports from esm.sh.
+- **`iframeSandbox: ['allow-forms', 'allow-popups', ...]`** adds sandbox tokens. `'allow-same-origin'` is refused: combined with `allow-scripts` it puts the frame in your origin, where it can reach your page and storage and delete its own `sandbox` attribute. `dangerouslyAllowSameOrigin: true` permits it for code you trust completely.
+- **Browser only.** Without a DOM (Node, a Worker) `createSandbox({ mode: 'iframe' })` rejects. `workerFactory`, `nodeWorker` and the wasm limits do not apply; `untrusted: true` still means `mode: 'wasm'`.
+- **Startup is bounded** by `defaultTimeoutMs`: a frame that never completes its handshake (for example a `container` that is not in a document) rejects `createSandbox()` and is removed.
+
+**Synchronous infinite loops depend on the browser's process model.** An `await`-based hang (a promise that never settles, a long `setInterval`) is always killed on time. A synchronous `while (true) {}` can only be killed when the browser runs the frame on another thread:
+
+- **Desktop Chrome** (site isolation on, the default; checked with Chrome 154) runs a sandboxed frame in its own renderer process. The timeout fires on time, the frame is removed, and the next call gets a new frame in milliseconds, **provided no other sandboxed frame from your site shares that process**. Chrome groups them by site, so while another andbox iframe (or any other opaque-origin frame from your site) is alive, the looping process cannot be shut down: the replacement frame lands in it and its startup times out, and those other frames stop responding too.
+- **WebKit (Safari's engine) and Chromium without full site isolation** (measured: Playwright's WebKit, and Playwright's Chromium without `--site-per-process`) run the frame on the host page's main thread. A synchronous infinite loop freezes your page, the timeout cannot fire, and the browser's own "page unresponsive" handling is the only way out. Chrome on Android, which does not isolate every site, is expected to behave the same; Firefox was not measured for this release.
+
+Use `mode: 'wasm'` (fuel and deadline inside the engine) or `worker` mode for code that may spin, and `iframe` mode for code that needs the DOM. `examples/09-iframe-browser/` is a working two-pane notebook demo; `test/browser/iframe-mode.spec.mjs` runs the contract in Chromium, Firefox and WebKit.
+
 ## API
 
 ### `createSandbox(options?)`
 
-Creates a new sandboxed runtime. Returns a promise (Worker mode) or object (inline/data-uri mode).
+Creates a new sandboxed runtime. Returns a promise (Worker, wasm and iframe modes) or object (inline/data-uri mode).
 
 **Options:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `mode` | `'worker' \| 'node-worker' \| 'wasm' \| 'inline' \| 'data-uri'` | `'worker'` | Execution mode |
+| `mode` | `'worker' \| 'node-worker' \| 'wasm' \| 'iframe' \| 'inline' \| 'data-uri' \| 'service-worker'` | `'worker'` | Execution mode |
 | `importMap` | `{ imports?, scopes? }` | `{}` | Import map for package resolution (Worker mode) |
 | `capabilities` | `Record<string, Function>` | `{}` | Host functions callable via `host.call()` (Worker mode) |
 | `defaultTimeoutMs` | `number` | `30000` | Default timeout for `evaluate()` |
@@ -264,8 +313,14 @@ Creates a new sandboxed runtime. Returns a promise (Worker mode) or object (inli
 | `globals` | `Record<string, any>` | `{}` | Global variables (inline/data-uri modes) |
 | `engineURL`, `wasmURL` | `string` | -- | `mode: 'wasm'`: same-origin URLs of the bundled engine module and the `.wasm` (optional under Node) |
 | `fuel`, `memoryBytes`, `stackBytes`, `deadlineMs` | `number` | see [Limits](#limits) | `mode: 'wasm'` limits (also accepted per `evaluate()` call) |
+| `container` | `Element` | offscreen in `document.body` | `mode: 'iframe'`: element the frame is appended to. A restarted frame takes its predecessor's place instead. |
+| `html` | `string` | `''` | `mode: 'iframe'`: initial `<body>` markup of every new frame |
+| `csp` | `string` | -- | `mode: 'iframe'`: Content-Security-Policy for the frame (`<meta http-equiv>`); must allow `'unsafe-eval'` if it restricts scripts |
+| `iframeSandbox` | `string[]` | `[]` | `mode: 'iframe'`: extra sandbox tokens (`allow-scripts` is always set); `'allow-same-origin'` throws unless `dangerouslyAllowSameOrigin` |
+| `dangerouslyAllowSameOrigin` | `boolean` | `false` | `mode: 'iframe'`: permit `'allow-same-origin'`, which removes the origin boundary |
+| `onFrame` | `(iframe) => void` | -- | `mode: 'iframe'`: called with every new frame (first and after each restart) before it is attached |
 
-**Returns (Worker mode):** `Promise<{ evaluate, defineModule, dispose, stats, isDisposed }>`
+**Returns (Worker mode):** `Promise<{ evaluate, defineModule, dispose, stats, isDisposed }>`. `mode: 'iframe'` adds `iframe`, the live `HTMLIFrameElement` (`null` after `dispose()`, replaced after a restart; see [`mode: 'iframe'`](#mode-iframe)).
 
 ### `sandbox.evaluate(code, opts?)`
 
@@ -289,7 +344,7 @@ Defines a virtual module that sandbox code can import via `sandboxImport(name)`.
 
 ### `sandbox.dispose()`
 
-Terminates the Worker and rejects all pending evaluations.
+Terminates the Worker (removes the frame in `mode: 'iframe'`) and rejects all pending evaluations.
 
 ### `sandbox.stats()`
 
@@ -426,6 +481,7 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 **Pick the mode by how much you trust the code:**
 
 - **`worker` and `node-worker` are for trusted or semi-trusted code** (your own scripts, plugins from known authors, LLM output you review). They organise and throttle what the code does; they do not contain a determined attacker. Still reachable from code in these modes: the platform `import()` operator (fetches and runs remote code, an exfiltration channel; `allowedImportHosts` only governs `sandboxImport()`), timing and `SharedArrayBuffer`/`Atomics` side channels, the Worker's shared realm and heap, any global a future platform adds that is not on the deny-list, and under Node `process`, `require` and the rest of the Node API.
+- **`iframe` is for code that needs the DOM**, trusted or semi-trusted, that you want kept away from your page. The browser enforces an origin boundary: the frame runs in an opaque origin and a separate realm, so it cannot read your document, cookies, storage or JavaScript objects, and it reaches you only through `host.call()` and the values it returns. It does not limit what the code does with its own window: network, CPU, memory, and (with the matching `iframeSandbox` tokens) popups and forms are its own. See "still yours" below and [`mode: 'iframe'`](#mode-iframe).
 - **`wasm` is the mode for untrusted code**, and `createSandbox({ untrusted: true })` selects it (and throws or rejects instead of falling back if it is unavailable, or if combined with another `mode`). The code runs in QuickJS compiled to WebAssembly with no ambient authority: no `fetch`, `import()` of URLs, timers, `process` or `require` exist in that engine, and its only way out is `host.call()` through `capabilities`, `policy` and the gate. It has real limits (`fuel`, `memoryBytes`, `stackBytes`, `deadlineMs`) and a hard `terminate()` backstop. It does **not** guarantee: that your own capabilities are safe (whatever you grant is reachable, so keep them narrow), protection from engine or WebAssembly-runtime bugs (still shared process memory; for hostile multi-tenant workloads add OS-level isolation), that an in-flight capability is cancelled when the cooperative deadline fires ([andbox#35](https://github.com/johnhenry/andbox/issues/35)), or Node-level hardening (`nodeWorker.permissions` is not supported in this mode). See [`mode: 'wasm'`](#mode-wasm) and [andbox#10](https://github.com/johnhenry/andbox/issues/10).
 
 **What andbox guarantees:**
@@ -437,12 +493,20 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 - **The capability gate cannot be walked around via the prototype chain.** `gateCapabilities()` builds the gated object with `Object.create(null)`, so `host.call('constructor', ...)` cannot resolve through `Object.prototype` to the real global `Object` constructor; the host resolves names through a `Map` and rejects anything that was not explicitly granted. First fixed in 0.0.1, hardened in 0.0.9; see [andbox#5](https://github.com/johnhenry/andbox/issues/5).
 - **`createNetworkFetch()`'s allowlist is redirect-safe.** Requests are made with `redirect: 'manual'` and any redirect response is rejected outright, so an allowlisted host cannot silently redirect a caller to a non-allowlisted one. Previously fixed; see [andbox#6](https://github.com/johnhenry/andbox/issues/6).
 - **`gateCapabilities()` enforces call/argument-size/concurrency caps per capability**, for cooperative callers that stay within the capabilities you actually granted.
+- **(`mode: 'iframe'`) An opaque origin and a separate realm, enforced by the browser.** The frame is `sandbox="allow-scripts"` without `allow-same-origin` (refused unless `dangerouslyAllowSameOrigin: true`). Its code gets `SecurityError` for `parent.document`, `top.location`, `parent.localStorage` and its own `localStorage`, has no access to your cookies, and shares no objects with your page: everything crossing the boundary is structured-cloned over a `MessagePort`. The port is handed over only after a handshake bound to that frame's own `contentWindow` and a per-frame random token (an `event.origin` of `'null'` alone proves nothing, since every opaque frame has it). Asserted by `test/browser/iframe-mode.spec.mjs`, which runs in Chromium, Firefox and WebKit.
 
 **What is still yours:**
 
 - **Worker-global APIs: partly removed, not contained.** Since 0.1.0 the worker prelude deletes `fetch`, `WebSocket`, `WebSocketStream`, `WebTransport`, `EventSource`, `XMLHttpRequest`, `Worker`, `SharedWorker`, `importScripts`, `indexedDB`, `caches`, `BroadcastChannel`, `postMessage` and `self` from the global scope before any evaluated code runs (after the runtime has captured what it needs), shadows those names for evaluated code, and gives evaluated code a throwaway `this`. A script no longer gets them by name, through `globalThis`, indirect `eval` or `Function`. **This is hardening, not a boundary, and a Worker is not a security boundary.** Still reachable: the platform `import()` operator (syntax, it cannot be deleted or shadowed: it can fetch and execute remote code and is an exfiltration channel; `allowedImportHosts` only governs `sandboxImport()`), timing and `SharedArrayBuffer`/`Atomics` side channels, anything the engine or platform adds later that is not on the list above (a deny-list can only ever be incomplete), and under Node `process`, `require` and the rest of the Node API (use `nodeWorker.permissions`, and see [Node](#node)). Everything shares the Worker's realm and heap, so any prototype or intrinsic the code mutates is shared with the runtime. A different isolation primitive is required for hostile code: [`mode: 'wasm'`](#mode-wasm) (QuickJS in WebAssembly, no ambient authority) or a cross-origin iframe with a strict CSP. See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
 - **`sandboxImport()` remote imports: allowed unless `allowedImportHosts` is provided, and only `sandboxImport()` is governed.** With `allowedImportHosts` unset, absolute and protocol-relative `http(s)` specifiers load from any host (0.1.0 denied them by default; 0.1.1 reverted that). Pass `allowedImportHosts: [...]` to restrict to those hostnames plus `baseURL`'s own host (refused with `Import denied: <host> is not in allowedImportHosts`), or `allowedImportHosts: []` to deny all remote imports. Import-map targets and virtual modules are host-authored and unaffected. The check cannot see inside a module once loaded (its own static `import`s) and cannot stop the platform `import()` operator (see the previous item). `mode: 'wasm'` never fetches URLs at all. See [andbox#7](https://github.com/johnhenry/andbox/issues/7).
 - **A timeout cannot undo in-flight host-side effects; it can ask them to stop.** When the Worker is terminated (timeout, an aborted `evaluate()`, `dispose()`, a crash) every capability call still in flight sees `this.signal` abort, and its late result is dropped rather than delivered. Cancellation is cooperative: a capability that ignores `this.signal` still runs to completion on the host. Write effectful capabilities as `function`s (not arrows) and pass the signal on (`fetch(url, { signal: this.signal })`), and keep them idempotent. In `mode: 'wasm'`, a cooperative `deadlineMs` ends the evaluation without terminating the Worker, so the signal does not abort in that case. See [andbox#8](https://github.com/johnhenry/andbox/issues/8).
+- **`mode: 'iframe'`: the origin boundary is the whole guarantee.** Still yours:
+  - **Network.** The frame has `fetch`, `WebSocket`, `import()`, `<img>`, `<form>` and so on, as a `null`-origin client: it can exfiltrate anything it was given or computed, and reach any server that answers cross-origin requests. Pass a `csp` (`default-src 'none'` plus what the code needs) to restrict it.
+  - **CPU and memory.** An `await`-based hang is killed on time; a synchronous loop is killable only where the browser runs the frame out of process, and in Chrome only while no other frame from your site shares that process. WebKit/Safari (and Chromium without full site isolation) run the frame on your page's thread, where a busy loop freezes your page. No memory cap. See [`mode: 'iframe'`](#mode-iframe).
+  - **Same process in some browsers.** Where the frame is not site-isolated (WebKit/Safari, Chromium without full site isolation such as Android Chrome, possibly Firefox) it shares a process and address space with your page: the origin boundary still holds for JavaScript, but a browser memory-safety bug or a Spectre-style read is not stopped by a process boundary. Timing side channels (`performance.now()`, `SharedArrayBuffer` where cross-origin isolation enables it) are available to the frame either way.
+  - **What you enable.** Every `iframeSandbox` token is a capability: `allow-popups` lets it open windows, `allow-forms` submit forms, `allow-top-navigation` navigate your page, `allow-modals` show dialogs. `dangerouslyAllowSameOrigin` removes the boundary entirely.
+  - **The UI it draws.** You chose to show the frame; it controls those pixels and can draw a convincing fake login form inside them. Keep frames visibly framed as untrusted content.
+  - **What you grant and what you accept.** Capabilities are as reachable as in any other mode, and results are values from untrusted code.
 - **`mode: 'service-worker'` does not provide isolation by merely existing.** It's a hosting mechanism -- a real Service Worker, same-origin by default, serving your `files` map with real fetch/navigation interception. Content served through it can see and touch its own origin exactly like any other same-origin page can; nothing about registering a Service Worker sandboxes what runs inside the pages it serves. If you're hosting content you don't fully trust, point this mode at a genuinely separate origin from day one -- the same recommendation the `fetch`/`WebSocket`/`Worker` item above makes for `worker` mode (a cross-origin iframe with a strict CSP), not something bolted on after the fact. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 - **The Service Worker does not control the very first navigation into its scope.** A page/iframe navigation into `scope` that happens *before* the registration has finished activating is a normal, unintercepted network request -- Service Workers never retroactively intercept a request that already went out. `createSandbox({ mode: 'service-worker' })`'s returned promise only resolves once the registration is active (its generated script also calls `clients.claim()` on activate, which helps *already-open* clients but not fresh navigations); the documented, load-bearing contract is: don't navigate anything into `scope` until that promise resolves. Do that and every request is intercepted from the first byte, because the registration already matches `scope` before the navigation request is made. See [andbox#14](https://github.com/johnhenry/andbox/issues/14).
 
@@ -452,17 +516,17 @@ If you need to run untrusted/adversarial code, use `createSandbox({ untrusted: t
 
 What each mode is built to stop, and what it is not. "Hostile" means code actively trying to escape or abuse the host.
 
-| | `worker` / `node-worker` | `wasm` |
-|---|---|---|
-| **Runs in** | The Worker's own JS engine (`new Function`) | QuickJS-ng compiled to WebAssembly, inside the Worker / worker thread |
-| **Reaching `fetch`, `WebSocket`, `importScripts`, `indexedDB`, `postMessage`** | Removed from the global scope by the prelude (0.1.0), so not reachable by name or via `globalThis`/`eval`/`Function`. Deny-list hardening only: `import()`, timing channels and (Node) `process`/`require` remain. | Not possible. The engine has no such globals, and `constructor`/`eval`/`Function` chains only reach the guest realm. |
-| **Forging protocol messages to the host** | `postMessage`/`self` are removed; ids are random UUIDs and each `result` must echo a per-evaluate nonce. | Not possible. The guest has no `postMessage` or `self`. |
-| **`sandboxImport` of arbitrary URLs / Node builtins** | Remote `http(s)` URLs allowed unless `allowedImportHosts` is provided (then only listed hosts; `[]` denies all); the raw `import()` operator is still unrestricted (browser), and Node builtins are blocked only with `nodeWorker.permissions` (Node). | Refused: only virtual modules resolve; no URL is fetched. |
-| **Prototype-chain names via `host.call`** | Closed by the capability gate (`Object.create(null)`). | Same gate, plus the guest never sees host objects. |
-| **Infinite loops** | `terminate()` after `timeoutMs`, then a new Worker. | Deterministic `fuel` and a wall-clock `deadlineMs` stop it without a respawn; `terminate()` remains the backstop. |
-| **Memory exhaustion** | Browser: nothing but the tab limit. Node: opt-in `nodeWorker.maxMemoryMb`. | Guest heap cap plus a hard cap on the engine's linear memory. |
-| **Deep recursion** | Engine stack limit of the host JS engine. | `stackBytes`; overflow is a catchable `RangeError`. |
-| **Capability abuse** | `gateCapabilities()` rate and size limits (cooperative callers). | Same. |
+| | `worker` / `node-worker` | `wasm` | `iframe` |
+|---|---|---|---|
+| **Runs in** | The Worker's own JS engine (`new Function`) | QuickJS-ng compiled to WebAssembly, inside the Worker / worker thread | The browser's JS engine, in a sandboxed opaque-origin frame (`new Function` in the frame's realm) |
+| **Reaching `fetch`, `WebSocket`, `importScripts`, `indexedDB`, `postMessage`** | Removed from the global scope by the prelude (0.1.0), so not reachable by name or via `globalThis`/`eval`/`Function`. Deny-list hardening only: `import()`, timing channels and (Node) `process`/`require` remain. | Not possible. The engine has no such globals, and `constructor`/`eval`/`Function` chains only reach the guest realm. | Available, as the frame's own (`null`-origin) APIs; restrict the network with `csp`. Your page, cookies and storage are not reachable (`SecurityError`). |
+| **Forging protocol messages to the host** | `postMessage`/`self` are removed; ids are random UUIDs and each `result` must echo a per-evaluate nonce. | Not possible. The guest has no `postMessage` or `self`. | Only over its own `MessagePort`, with the same random ids and nonce; the host accepts nothing else from the frame. |
+| **`sandboxImport` of arbitrary URLs / Node builtins** | Remote `http(s)` URLs allowed unless `allowedImportHosts` is provided (then only listed hosts; `[]` denies all); the raw `import()` operator is still unrestricted (browser), and Node builtins are blocked only with `nodeWorker.permissions` (Node). | Refused: only virtual modules resolve; no URL is fetched. | As worker mode (`allowedImportHosts` governs `sandboxImport()` only); requests are cross-origin from `null`. `csp` can restrict `import()` too. |
+| **Prototype-chain names via `host.call`** | Closed by the capability gate (`Object.create(null)`). | Same gate, plus the guest never sees host objects. | Same gate; separate realm, so no shared intrinsics. |
+| **Infinite loops** | `terminate()` after `timeoutMs`, then a new Worker. | Deterministic `fuel` and a wall-clock `deadlineMs` stop it without a respawn; `terminate()` remains the backstop. | Async hangs: frame removed after `timeoutMs`, then a new frame. Synchronous loops: only where the frame is out of process (desktop Chrome, with no other same-site sandboxed frame alive); elsewhere they freeze the page. |
+| **Memory exhaustion** | Browser: nothing but the tab limit. Node: opt-in `nodeWorker.maxMemoryMb`. | Guest heap cap plus a hard cap on the engine's linear memory. | Nothing but the browser's per-process/tab limit. |
+| **Deep recursion** | Engine stack limit of the host JS engine. | `stackBytes`; overflow is a catchable `RangeError`. | Engine stack limit. |
+| **Capability abuse** | `gateCapabilities()` rate and size limits (cooperative callers). | Same. | Same. |
 
 **What `wasm` mode does not defend against**
 

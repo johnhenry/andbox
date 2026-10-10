@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.2
+
+- **New: `mode: 'iframe'`** ([#10](https://github.com/johnhenry/andbox/issues/10)'s
+  cross-origin-iframe option). `createSandbox({ mode: 'iframe' })` runs
+  evaluated code in an `<iframe sandbox="allow-scripts" srcdoc>` with no
+  `allow-same-origin`: an opaque origin and a separate realm with its own
+  `window` and `document`, so the code can render DOM (charts, canvas
+  animations, HTML) while the browser keeps it out of your page, cookies and
+  storage. Same API and semantics as worker mode (`evaluate`, `host.call`,
+  `sandboxImport` with `allowedImportHosts`, `importMap`, console forwarding,
+  `timeoutMs`/`AbortSignal` hard-kill with the same `TimeoutError`/`AbortError`);
+  the returned sandbox adds `iframe`, the live element (replaced after a
+  restart, `null` after `dispose()`). New options: `container`, `html`, `csp`,
+  `iframeSandbox` (`'allow-same-origin'` throws unless
+  `dangerouslyAllowSameOrigin: true`) and `onFrame`. Browser only.
+- **Limitation:** a synchronous infinite loop can only be killed where the
+  browser runs the frame out of process (desktop Chrome, and only while no
+  other sandboxed frame of your site shares that process); in WebKit/Safari it
+  freezes the host page. README "Security model" lists what the origin
+  boundary does not cover.
+- `makeWorkerSource()` output is unchanged; its runtime is now shared with the
+  iframe mode through an internal `makeRuntimeSource()`.
+- **Tests:** browser tests with Playwright in Chromium, Firefox and WebKit
+  (`npm run test:browser`, also in CI); `examples/09-iframe-browser/`
+  (`npm run example:09:headless`).
+
 ## 0.1.1
 
 - **Behaviour change: remote imports allowed by default again; pass

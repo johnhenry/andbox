@@ -26,6 +26,32 @@
  * @returns {string} The Worker script source code.
  */
 export function makeWorkerSource() {
+  return makeRuntimeSource({ lockdown: true });
+}
+
+/**
+ * The shared runtime behind `makeWorkerSource()` (Worker) and `mode: 'iframe'`.
+ *
+ * The script talks to the host through a `self`-shaped object with
+ * `postMessage`, `close` and an `onmessage` setter: the real Worker global
+ * scope, or (iframe mode) a wrapper around a MessagePort the frame was handed.
+ *
+ * @param {{ lockdown?: boolean }} [options]
+ *   `lockdown` (default true) deletes and shadows the Worker's ambient
+ *   network/worker globals (andbox#10). The iframe runtime turns it off: there
+ *   the browser's opaque-origin boundary is the isolation, and evaluated code is
+ *   meant to have its frame's `window`/`document`.
+ * @returns {string}
+ */
+export function makeRuntimeSource({ lockdown = true } = {}) {
+  const lockedGlobals = lockdown
+    ? `[
+  'fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
+  'Worker', 'SharedWorker', 'importScripts', 'indexedDB', 'caches', 'BroadcastChannel',
+  'postMessage', 'self',
+]`
+    : '[]';
+  const shadowed = lockdown ? "[...LOCKED_GLOBALS, 'window']" : '[]';
   return `
 'use strict';
 
@@ -48,11 +74,7 @@ try { delete globalThis.__andboxNodeVirtual; } catch {}
 const scope = self;
 const post = self.postMessage.bind(self);
 const closeSelf = typeof self.close === 'function' ? self.close.bind(self) : () => {};
-const LOCKED_GLOBALS = [
-  'fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
-  'Worker', 'SharedWorker', 'importScripts', 'indexedDB', 'caches', 'BroadcastChannel',
-  'postMessage', 'self',
-];
+const LOCKED_GLOBALS = ${lockedGlobals};
 for (const k of LOCKED_GLOBALS) {
   try { delete globalThis[k]; } catch {}
   if (k in globalThis) {
@@ -61,7 +83,7 @@ for (const k of LOCKED_GLOBALS) {
 }
 // Names shadowed lexically for evaluated code as well (covers environments
 // where a global could not be deleted).
-const SHADOWED = [...LOCKED_GLOBALS, 'window'];
+const SHADOWED = ${shadowed};
 
 // ── Remote import policy (andbox#7) ──
 function assertImportAllowed(href) {
