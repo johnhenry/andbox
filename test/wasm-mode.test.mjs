@@ -459,7 +459,7 @@ describe("createSandbox({ untrusted: true })", () => {
   });
 
   it('throws when combined with a weaker mode', () => {
-    for (const mode of ['worker', 'node-worker', 'inline', 'data-uri', 'service-worker']) {
+    for (const mode of ['worker', 'node-worker', 'iframe', 'inline', 'data-uri', 'service-worker']) {
       assert.throws(() => createSandbox({ untrusted: true, mode }), /untrusted.*wasm/);
     }
   });

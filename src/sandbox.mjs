@@ -1,7 +1,7 @@
 /**
  * andbox — Sandboxed JavaScript runtime.
  *
- * Creates an isolated Web Worker sandbox with:
+ * Creates an isolated Web Worker (or, with mode: 'iframe', sandboxed iframe) sandbox with:
  * - RPC-based capability calls (host.call)
  * - Import map resolution
  * - Virtual module definitions
@@ -17,6 +17,7 @@ import { gateCapabilities } from './capability-gate.mjs';
 import { makeDeferred, makeTimeoutError, makeAbortError } from './deferred.mjs';
 import { DEFAULT_TIMEOUT_MS } from './constants.mjs';
 import { isNodeRuntime, createNodeWorkerFactory } from './node-worker.mjs';
+import { normalizeIframeOptions, createIframeFactory, makeIframeRuntimeSource } from './iframe-host.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
@@ -305,15 +306,21 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {string} [baseURL] - Base URL for relative imports
  * @property {import('./capability-gate.mjs').GatePolicy} [policy] - Rate limiting policy
  * @property {(level: string, ...args: string[]) => void} [onConsole] - Console output handler
+ * @property {Element} [container] - mode: 'iframe': element the frame is appended to (default: offscreen in document.body)
+ * @property {string} [html] - mode: 'iframe': initial body markup
+ * @property {string} [csp] - mode: 'iframe': Content-Security-Policy for the frame
+ * @property {string[]} [iframeSandbox] - mode: 'iframe': extra sandbox tokens ('allow-same-origin' needs dangerouslyAllowSameOrigin)
+ * @property {boolean} [dangerouslyAllowSameOrigin] - mode: 'iframe': permit 'allow-same-origin' (removes the origin boundary)
+ * @property {(iframe: HTMLIFrameElement) => void} [onFrame] - mode: 'iframe': called with every new frame before it is attached
  */
 
-const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'inline', 'data-uri', 'service-worker'];
+const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'iframe', 'inline', 'data-uri', 'service-worker'];
 
 /**
  * Create a new sandboxed runtime.
  *
  * @param {SandboxOptions | ServiceWorkerSandboxOptions} [options]
- * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
+ * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean, iframe?: HTMLIFrameElement | null }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
  */
 export function createSandbox(options = {}) {
   if (options.untrusted === true) {
@@ -342,7 +349,7 @@ export function createSandbox(options = {}) {
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
   if (mode === 'service-worker') return createServiceWorkerSandbox(options);
-  return createWorkerSandbox(options, mode === 'node-worker', mode === 'wasm');
+  return createWorkerSandbox(options, mode);
 }
 
 /** Default limits for `mode: 'wasm'` (0 = unlimited / not enforced). */
@@ -408,7 +415,18 @@ async function resolveWasmConfig(options, baseURL, usingNode) {
   };
 }
 
-async function createWorkerSandbox(options = {}, forceNode = false, isWasm = false) {
+/**
+ * Worker-shaped sandboxes: `worker`, `node-worker`, `wasm` and `iframe`. They
+ * share one host implementation; `iframe` swaps the Worker for a sandboxed
+ * `<iframe>` adapter (src/iframe-host.mjs) behind the same interface.
+ *
+ * @param {object} options
+ * @param {'worker' | 'node-worker' | 'wasm' | 'iframe'} [kind]
+ */
+async function createWorkerSandbox(options = {}, kind = 'worker') {
+  const forceNode = kind === 'node-worker';
+  const isWasm = kind === 'wasm';
+  const isIframe = kind === 'iframe';
   const {
     importMap = { imports: {}, scopes: {} },
     capabilities = {},
@@ -433,6 +451,18 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
   // default selects it only when there is no global Worker under Node.
   let workerFactory = options.workerFactory || null;
   let usingNode = false;
+  // mode: 'iframe' -- a sandboxed, opaque-origin <iframe> instead of a Worker.
+  let iframeHost = null;
+  if (isIframe) {
+    if (options.workerFactory || nodeWorker) {
+      throw new Error("workerFactory and nodeWorker do not apply to mode: 'iframe'.");
+    }
+    iframeHost = createIframeFactory(
+      normalizeIframeOptions(options),
+      defaultTimeoutMs > 0 ? defaultTimeoutMs : DEFAULT_TIMEOUT_MS
+    );
+    workerFactory = iframeHost.factory;
+  }
   if (!workerFactory && (forceNode || (typeof Worker === 'undefined' && isNodeRuntime()))) {
     workerFactory = await createNodeWorkerFactory(nodeWorker);
     usingNode = true;
@@ -494,7 +524,7 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
 
   function createWorker() {
     workerAbort = new AbortController();
-    const source = isWasm ? makeWasmWorkerSource() : makeWorkerSource();
+    const source = isWasm ? makeWasmWorkerSource() : isIframe ? makeIframeRuntimeSource() : makeWorkerSource();
     if (workerFactory) {
       worker = workerFactory(source);
       attachWorkerHandlers();
@@ -817,11 +847,21 @@ async function createWorkerSandbox(options = {}, forceNode = false, isWasm = fal
     endOp();
   }
 
-  return {
+  const sandbox = {
     evaluate,
     defineModule,
     dispose,
     stats,
     isDisposed: () => disposed,
   };
+  if (iframeHost) {
+    // The live frame. A timeout, abort or unload replaces it with a new
+    // element (same container position and attributes; `onFrame` is called
+    // for every new one), and it is null after dispose().
+    Object.defineProperty(sandbox, 'iframe', {
+      enumerable: true,
+      get: () => (disposed ? null : iframeHost.current()),
+    });
+  }
+  return sandbox;
 }
