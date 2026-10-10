@@ -27,7 +27,9 @@ modes that excludes.
    it needs a real browser and is not part of this script or CI.
 3. `npm run test:browser` -- Playwright (`playwright.config.mjs`,
    `test/browser/*.spec.mjs`) in Chromium, Firefox and WebKit; the only
-   automated coverage of `mode: 'iframe'`, which needs a real DOM. First run:
+   automated coverage of `mode: 'iframe'`, which needs a real DOM, and of a
+   real browser Worker (`network-fetch.spec.mjs` runs the `network` fetch
+   shim in both). First run:
    `npx playwright install chromium firefox webkit`. The suite serves the repo
    with `test/browser/serve.mjs` on port 47391 (`ANDBOX_TEST_PORT` overrides).
    `npm run example:09:headless` runs the iframe demo the same way.

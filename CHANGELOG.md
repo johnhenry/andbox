@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.3
+
+- **New: `network` option, a host-backed global `fetch`** ([#39](https://github.com/johnhenry/andbox/issues/39)).
+  `createSandbox({ network: { fetch(url, init) { ... } } })` installs a global
+  `fetch` in the sandbox (worker, node-worker and iframe modes) that sends
+  every request to that host function, so libraries imported into the sandbox
+  that call the global `fetch` work. The shim refuses non-http(s) URLs, sends
+  only the URL, method, header pairs, body and redirect mode, and rebuilds a
+  real `Response`; `credentials` is the host's (`network.credentials`,
+  default `'omit'`), and `Set-Cookie` never reaches the sandbox. The request
+  is the gated capability `fetch`, so `policy.capabilities.fetch` applies, and
+  the host side re-validates it as untrusted input.
+  `network: { allowedHosts: [...] }` puts `createNetworkFetch()` in front (of
+  `network.fetch`, or of the host's own `fetch`). Without the option nothing
+  changes: worker modes still have no `fetch`. Throws in `wasm`, `inline`,
+  `data-uri` and `service-worker` modes, and together with a capability
+  named `fetch`.
+- **Limitation:** it narrows `fetch` only. The platform `import()` operator
+  (and, in iframe mode, the frame's other network APIs unless `csp` blocks
+  them) still reach the network; README "Mediated network" and "Security
+  model" have the details. Responses are buffered, not streamed, and aborting
+  the sandbox-side signal does not cancel the host request.
+- `makeWorkerSource({ networkFetch: true })` returns the runtime with the
+  shim; `makeWorkerSource()` output is unchanged.
+- **Tests:** `test/network-fetch.test.mjs` (worker_threads) and
+  `test/browser/network-fetch.spec.mjs` (browser Worker and iframe mode in
+  Chromium, Firefox and WebKit).
+- **Docs:** `createNetworkFetch()`'s API entry no longer says it follows
+  redirects; it has rejected them since 0.0.1 ([#6](https://github.com/johnhenry/andbox/issues/6)).
+
 ## 0.1.2
 
 - **New: `mode: 'iframe'`** ([#10](https://github.com/johnhenry/andbox/issues/10)'s
