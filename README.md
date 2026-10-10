@@ -596,15 +596,6 @@ code-based tool execution.
   is the source of truth for what that capability gate does and does not
   guarantee -- the middleware's Security model section points back here
   rather than repeating it.
-- **[`@johnhenry/prism`](https://github.com/johnhenry/prism)** -- a live
-  HTTP request inspector/proxy whose custom script-route feature runs
-  user-provided route handlers via `createSandbox({ mode: 'inline' })`.
-  Deliberately uses `inline` mode, not the default `worker` mode: the
-  handler needs a live `Request` object (with its body stream) directly in
-  scope, which can't cross a Worker's structured-clone boundary, and the
-  feature's predecessor (a package called `vimble`) never provided real
-  isolation either -- `inline`'s explicit "no isolation, code you already
-  trust" framing is the honest match, not a downgrade from what came before.
 
 ## License
 
