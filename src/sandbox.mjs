@@ -18,7 +18,7 @@ import { makeDeferred, makeTimeoutError, makeAbortError } from './deferred.mjs';
 import { DEFAULT_TIMEOUT_MS } from './constants.mjs';
 import { isNodeRuntime, createNodeWorkerFactory } from './node-worker.mjs';
 import { normalizeIframeOptions, createIframeFactory, makeIframeRuntimeSource } from './iframe-host.mjs';
-import { createFetchCapability } from './network-policy.mjs';
+import { createFetchCapability, validateNetworkOptions } from './network-policy.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
@@ -313,7 +313,7 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {string[]} [iframeSandbox] - mode: 'iframe': extra sandbox tokens ('allow-same-origin' needs dangerouslyAllowSameOrigin)
  * @property {boolean} [dangerouslyAllowSameOrigin] - mode: 'iframe': permit 'allow-same-origin' (removes the origin boundary)
  * @property {(iframe: HTMLIFrameElement) => void} [onFrame] - mode: 'iframe': called with every new frame before it is attached
- * @property {{ fetch?: Function, allowedHosts?: string[], credentials?: RequestCredentials }} [network] - worker, node-worker and iframe modes: install a global `fetch` in the sandbox that goes through the host (andbox#39)
+ * @property {{ allowedHosts: string[] | '*' | ((url: URL) => boolean | Promise<boolean>), fetch?: Function, credentials?: RequestCredentials }} [network] - worker, node-worker and iframe modes: install a global `fetch` in the sandbox that goes through the host (andbox#39); `allowedHosts` is required (andbox#43)
  */
 
 const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'iframe', 'inline', 'data-uri', 'service-worker'];
@@ -357,6 +357,8 @@ export function createSandbox(options = {}) {
       (mode === 'wasm' ? " The wasm engine has no fetch; expose a capability and call it with host.call()." : '')
     );
   }
+  // Refuse a bad `network` (no allowedHosts, andbox#43) before starting anything.
+  if (options.network !== undefined) validateNetworkOptions(options.network);
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
   if (mode === 'service-worker') return createServiceWorkerSandbox(options);

@@ -69,6 +69,17 @@ CI (`.github/workflows/ci.yml`) runs `npm install`, `npm test`,
   any refactor that reintroduces a plain `{}` object reopens the
   prototype-chain bypass this fixed.
 
+- **`network` must never mean "every host" by default.** Until 0.2.0,
+  `network: { fetch }` alone let the sandbox reach whatever the host function
+  would fetch; `allowedHosts` is now required (list, function, or the explicit
+  `'*'`), validated in `validateNetworkOptions()` synchronously in
+  `createSandbox()` before anything starts
+  ([andbox#43](https://github.com/johnhenry/andbox/issues/43)). A function
+  policy follows redirects hop by hop with `redirect: 'manual'` and must fail
+  closed on an `opaqueredirect` (what a browser's `fetch` returns): never
+  "fix" that by letting the platform follow and checking only the final URL,
+  which would already have contacted the intermediate hosts.
+
 - **`mode: 'wasm'` runs QuickJS, not the Worker's engine.** Its worker script
   (`src/wasm-worker-source.mjs`) is a real function stringified with
   `toString()`, so it must stay free of outside references. The memory limit

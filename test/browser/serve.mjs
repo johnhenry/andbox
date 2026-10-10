@@ -4,7 +4,8 @@
  * Serves the repo root, so `/src/index.mjs` loads with no bundler. Every
  * response carries `Access-Control-Allow-Origin: *`: the iframe sandbox runs
  * in an opaque origin, so module imports from it are always cross-origin
- * (CORS) requests, exactly as they would be against a CDN. Zero dependencies.
+ * (CORS) requests, exactly as they would be against a CDN. `/__redirect?to=<url>`
+ * answers 302 to `to` (default `/package.json`). Zero dependencies.
  *
  *   node test/browser/serve.mjs [port]
  */
@@ -25,6 +26,11 @@ const TYPES = {
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${port}`);
+  if (url.pathname === '/__redirect') {
+    // network-fetch.spec.mjs: a real 302 for the redirect rules of network.allowedHosts.
+    res.writeHead(302, { Location: url.searchParams.get('to') || '/package.json', 'Access-Control-Allow-Origin': '*' }).end();
+    return;
+  }
   const rel = decodeURIComponent(url.pathname);
   const file = path.join(root, rel);
   if (!file.startsWith(root + path.sep) || rel.includes('node_modules')) {
