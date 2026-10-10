@@ -8,6 +8,117 @@
  */
 
 /**
+ * The in-sandbox half of `createSandbox({ network })` (andbox#39): installs a
+ * global `fetch` that serializes the request, sends it to the host's `fetch`
+ * capability and rebuilds a real `Response` from the reply.
+ *
+ * Stringified into the runtime with `toString()`, so it must not reference
+ * anything outside its own body; the runtime passes in what it needs.
+ *
+ * @param {(name: string, args: unknown[]) => Promise<any>} callHost
+ * @param {() => string} getBaseURL  resolves relative URLs (the Worker's own
+ *   location is a `blob:` URL, which relative URLs cannot resolve against)
+ */
+function installNetworkFetch(callHost, getBaseURL) {
+  // Captured once, before evaluated code runs, so later changes to these
+  // globals do not change what the shim does.
+  const G = globalThis;
+  const RequestCtor = G.Request;
+  const ResponseCtor = G.Response;
+  const URLCtor = G.URL;
+  const DOMExceptionCtor = G.DOMException;
+  const toBase64 = G.btoa.bind(G);
+  const fromCharCode = String.fromCharCode;
+  const defineProperty = Object.defineProperty;
+  const NULL_BODY_STATUS = [101, 103, 204, 205, 304];
+
+  function abortReason(signal) {
+    if (signal.reason !== undefined) return signal.reason;
+    return typeof DOMExceptionCtor === 'function'
+      ? new DOMExceptionCtor('This operation was aborted', 'AbortError')
+      : Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+  }
+
+  function bytesToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return toBase64(binary);
+  }
+
+  async function fetch(input, init) {
+    const options = init == null ? {} : init;
+    const isRequest = input instanceof RequestCtor;
+    const signal = options.signal != null ? options.signal : isRequest ? input.signal : null;
+    if (signal && signal.aborted) throw abortReason(signal);
+
+    const raw = isRequest ? input.url : String(input);
+    let url;
+    try {
+      url = new URLCtor(raw, getBaseURL());
+    } catch {
+      throw new TypeError(`fetch: invalid URL: ${raw}`);
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new TypeError(`fetch: only http(s) URLs are allowed (got ${url.protocol})`);
+    }
+
+    // Let the platform normalise method, headers and body (FormData,
+    // URLSearchParams, Blob, typed arrays, streams). Only these fields reach
+    // the host; credentials, mode, cache, referrer and the rest are the
+    // host's decision, not the sandbox's.
+    const picked = {};
+    for (const k of ['method', 'headers', 'body', 'redirect', 'duplex']) {
+      if (options[k] !== undefined) picked[k] = options[k];
+    }
+    const request = new RequestCtor(isRequest ? input : url.href, picked);
+    const wire = { method: request.method, headers: [...request.headers], redirect: request.redirect };
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      if (typeof options.body === 'string') {
+        wire.body = options.body;
+      } else {
+        // Binary travels as base64 so the capability gate's argument-size
+        // limits (policy.capabilities.fetch.maxArgBytes) count it.
+        const buffer = await request.arrayBuffer();
+        if (buffer.byteLength > 0) wire.bodyBase64 = bytesToBase64(buffer);
+      }
+    }
+
+    const pending = callHost('fetch', [url.href, wire]);
+    let reply;
+    try {
+      reply = signal
+        ? await new Promise((resolve, reject) => {
+            const onAbort = () => reject(abortReason(signal));
+            signal.addEventListener('abort', onAbort, { once: true });
+            pending.then(
+              (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+              (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+            );
+          })
+        : await pending;
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      throw new TypeError(`fetch failed: ${e && e.message ? e.message : String(e)}`, { cause: e });
+    }
+
+    const response = new ResponseCtor(NULL_BODY_STATUS.includes(reply.status) ? null : reply.body, {
+      status: reply.status,
+      statusText: reply.statusText,
+      headers: reply.headers,
+    });
+    defineProperty(response, 'url', { value: reply.url, enumerable: true });
+    defineProperty(response, 'redirected', { value: reply.redirected === true, enumerable: true });
+    return response;
+  }
+
+  try { delete G.fetch; } catch {}
+  defineProperty(G, 'fetch', { value: fetch, writable: true, configurable: true, enumerable: false });
+}
+
+/**
  * Generate the Worker source code as a string.
  *
  * The Worker supports the following message types from the host:
@@ -23,10 +134,14 @@
  * - `capabilityCall`: RPC request to host capability
  * - `console`: Forwarded console output
  *
+ * @param {{ networkFetch?: boolean }} [options]
+ *   `networkFetch` (default false) installs a global `fetch` that forwards
+ *   every request to the host's `fetch` capability (`createSandbox({ network })`,
+ *   andbox#39) instead of leaving `fetch` locked.
  * @returns {string} The Worker script source code.
  */
-export function makeWorkerSource() {
-  return makeRuntimeSource({ lockdown: true });
+export function makeWorkerSource({ networkFetch = false } = {}) {
+  return makeRuntimeSource({ lockdown: true, networkFetch });
 }
 
 /**
@@ -36,17 +151,21 @@ export function makeWorkerSource() {
  * `postMessage`, `close` and an `onmessage` setter: the real Worker global
  * scope, or (iframe mode) a wrapper around a MessagePort the frame was handed.
  *
- * @param {{ lockdown?: boolean }} [options]
+ * @param {{ lockdown?: boolean, networkFetch?: boolean }} [options]
  *   `lockdown` (default true) deletes and shadows the Worker's ambient
  *   network/worker globals (andbox#10). The iframe runtime turns it off: there
  *   the browser's opaque-origin boundary is the isolation, and evaluated code is
  *   meant to have its frame's `window`/`document`.
+ *   `networkFetch` (default false) replaces the global `fetch` with a shim that
+ *   sends each request to the host's `fetch` capability (andbox#39). With
+ *   `lockdown` it is the only `fetch` the code can reach; everything else on
+ *   the lockdown list stays removed.
  * @returns {string}
  */
-export function makeRuntimeSource({ lockdown = true } = {}) {
+export function makeRuntimeSource({ lockdown = true, networkFetch = false } = {}) {
   const lockedGlobals = lockdown
     ? `[
-  'fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
+  ${networkFetch ? '' : "'fetch', "}'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
   'Worker', 'SharedWorker', 'importScripts', 'indexedDB', 'caches', 'BroadcastChannel',
   'postMessage', 'self',
 ]`
@@ -81,7 +200,11 @@ for (const k of LOCKED_GLOBALS) {
     try { Object.defineProperty(globalThis, k, { value: undefined, writable: false, configurable: false }); } catch {}
   }
 }
-// Names shadowed lexically for evaluated code as well (covers environments
+${networkFetch ? `// ── Host-backed fetch (andbox#39) ──
+// Replaces the global fetch: every request goes to the host's
+// gated \`fetch\` capability, which decides policy and credentials.
+(${installNetworkFetch.toString()})((name, args) => callCapability(name, args), () => baseURL);
+` : ''}// Names shadowed lexically for evaluated code as well (covers environments
 // where a global could not be deleted).
 const SHADOWED = ${shadowed};
 

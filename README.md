@@ -22,6 +22,7 @@ Zero dependencies. Uses only Web Workers and standard browser APIs.
 - [Node](#node)
 - [`mode: 'wasm'`](#mode-wasm)
 - [`mode: 'iframe'`](#mode-iframe)
+- [Mediated network: `network`](#mediated-network-network)
 - [API](#api)
 - [Execution model](#execution-model)
 - [Security model](#security-model)
@@ -275,7 +276,7 @@ pane.iframe.style.height = '300px'; // the live element; size it like any other
 
 **Differences from worker mode.**
 
-- **The code has a full browser window.** `window`, `document`, `fetch`, timers and `requestAnimationFrame` are the frame's own; nothing is deleted or shadowed (the worker-mode lockdown does not apply, the origin boundary does). `document.body.append(...)` renders where you mounted the frame.
+- **The code has a full browser window.** `window`, `document`, `fetch`, timers and `requestAnimationFrame` are the frame's own; nothing is deleted or shadowed (the worker-mode lockdown does not apply, the origin boundary does). `document.body.append(...)` renders where you mounted the frame. With [`network`](#mediated-network-network), `fetch` is replaced by the host-backed one.
 - **`sandbox.iframe` is the live element, and it changes.** A timeout, an abort, or the frame navigating/reloading itself replaces it with a new element in the same place, with the same attributes (`class`, `style`, `width`, ...); everything the old document held is gone. `onFrame(iframe)` is called for every new frame before it is attached, so set things up there if you need them on every frame, or insert the frame yourself there. `sandbox.iframe` is `null` after `dispose()`.
 - **Do not move the element in the DOM.** Re-parenting an iframe reloads its document. andbox notices (the pending call rejects with `Sandbox iframe unloaded ...`) and the next call gets a fresh frame, but state is lost. Pass `container` (or place it in `onFrame`) instead.
 - **Remote modules are cross-origin requests.** The frame's origin is `null`, so a module URL must be served with `Access-Control-Allow-Origin` (CDNs such as esm.sh do). A relative `sandboxImport('./x.js')` resolves against `baseURL` (default: your page URL) and needs the same header.
@@ -290,6 +291,46 @@ pane.iframe.style.height = '300px'; // the live element; size it like any other
 - **WebKit (Safari's engine) and Chromium without full site isolation** (measured: Playwright's WebKit, and Playwright's Chromium without `--site-per-process`) run the frame on the host page's main thread. A synchronous infinite loop freezes your page, the timeout cannot fire, and the browser's own "page unresponsive" handling is the only way out. Chrome on Android, which does not isolate every site, is expected to behave the same; Firefox was not measured for this release.
 
 Use `mode: 'wasm'` (fuel and deadline inside the engine) or `worker` mode for code that may spin, and `iframe` mode for code that needs the DOM. `examples/09-iframe-browser/` is a working two-pane notebook demo; `test/browser/iframe-mode.spec.mjs` runs the contract in Chromium, Firefox and WebKit.
+
+## Mediated network: `network`
+
+Worker mode removes `fetch` from the sandbox. Code you hand a capability to can call `host.call(...)`, but a library imported into the sandbox (`d3.json()`, `ky`, an API client) calls the **global** `fetch` and fails. The `network` option (0.1.3, [andbox#39](https://github.com/johnhenry/andbox/issues/39)) installs a global `fetch` in the sandbox that sends every request to a function on the host, which decides what happens:
+
+```js
+import { createSandbox } from '@johnhenry/andbox';
+
+const sandbox = await createSandbox({
+  network: {
+    // Runs on the host for every request the sandbox makes. Same signature as fetch.
+    async fetch(url, init) {
+      console.log(init.method, url);              // you see every request
+      return fetch(url, { ...init, referrerPolicy: 'no-referrer' }); // init.credentials is 'omit'
+    },
+    // allowedHosts: ['api.example.com'],         // optional: createNetworkFetch() allowlist in front of it
+  },
+  policy: { capabilities: { fetch: { maxCalls: 100 } } }, // the usual gate applies
+});
+
+await sandbox.defineModule('lib', `export const getJSON = async (u) => (await fetch(u)).json();`);
+await sandbox.evaluate(`
+  const { getJSON } = await sandboxImport('lib'); // knows nothing about andbox
+  return getJSON('https://api.example.com/items');
+`);
+```
+
+**Inside the sandbox**, `fetch(input, init)` resolves relative URLs against `baseURL`, refuses anything that is not `http:`/`https:` with a `TypeError`, lets the platform normalise the method, headers and body (strings, typed arrays, `Blob`, `FormData`, `URLSearchParams`, a `Request`), and sends only the URL, method, header pairs, body and `redirect` mode to the host. `credentials`, `mode`, `cache`, `referrer` and the other `RequestInit` fields are dropped. It resolves with a real `Response` (`status`, `statusText`, `headers`, `url`, `redirected`, `json()`/`text()`/`arrayBuffer()`/`body`). A host error rejects with `TypeError('fetch failed: ...')`, and `init.signal` rejects the call with `AbortError`. Everything else on the lockdown list (`XMLHttpRequest`, `WebSocket`, `EventSource`, `WebTransport`, `importScripts`, ...) stays removed.
+
+**On the host**, the request becomes an ordinary capability named `fetch`, so it goes through the capability gate and `policy` like any other (`policy.capabilities.fetch` limits it; `stats().gate.perCapability.fetch` counts it; binary bodies travel as base64, so `maxArgBytes` counts them). The host side treats it as untrusted input, because evaluated code can also call `host.call('fetch', url, init)` directly: it checks the URL again (http(s) only), validates the method, header pairs, body and `redirect`, and then calls your function as `fetch(url, init)` with `init.headers` a `Headers`, `init.body` a string or `Uint8Array`, `init.credentials` set by the host, and `init.signal` aborted when the sandbox is terminated (it is called without a `this`, so `network: { fetch }` with the platform's own `fetch` works). Return a `Response`, or a plain `{ status, statusText, headers, body, url, redirected }` (`body` a string, `ArrayBuffer`, typed array or `Blob`). `Set-Cookie` is never passed to the sandbox, and opaque or error responses (`status` outside 200-599) reject.
+
+| `network` field | Type | Default | Description |
+|---|---|---|---|
+| `fetch` | `(url, init) => Response \| { status, headers, body, ... }` | -- | Host function for every sandbox request. Required unless `allowedHosts` is given. |
+| `allowedHosts` | `string[]` | -- | Put [`createNetworkFetch(allowedHosts, fetch)`](#createnetworkfetchallowedhosts-fetchfn) in front: other hosts and any redirect are refused. Without `fetch` it wraps the host's own `fetch`. Must not be empty. |
+| `credentials` | `'omit' \| 'same-origin' \| 'include'` | `'omit'` | What the host passes as `init.credentials`. The sandbox cannot change it. |
+
+**Modes.** `worker` and `node-worker`: the shim is the only `fetch` the code can reach by name. `iframe`: it replaces the frame's own `fetch`, but the frame still has its other network APIs (`XMLHttpRequest`, `WebSocket`, `<img>`, `import()`); add `csp: "connect-src 'none'"` (and `default-src` as needed) to leave the host function as the only way to fetch, since the shim talks to the host over a `MessagePort` that CSP does not affect. `wasm`, `inline`, `data-uri` and `service-worker` throw if `network` is given (in `wasm`, expose a capability and use `host.call()`). Passing both `network` and a capability named `fetch` throws.
+
+**Limits.** The response body is buffered on the host and copied into the sandbox (no streaming; enforce size limits in your function, for example from `content-length` and `arrayBuffer().byteLength`). Aborting the sandbox-side `signal` rejects the call immediately but does not cancel the host request; terminating the sandbox does (`init.signal`). The rebuilt `Response` has `type: 'default'`. What this does and does not narrow is in the [Security model](#security-model).
 
 ## API
 
@@ -319,6 +360,7 @@ Creates a new sandboxed runtime. Returns a promise (Worker, wasm and iframe mode
 | `iframeSandbox` | `string[]` | `[]` | `mode: 'iframe'`: extra sandbox tokens (`allow-scripts` is always set); `'allow-same-origin'` throws unless `dangerouslyAllowSameOrigin` |
 | `dangerouslyAllowSameOrigin` | `boolean` | `false` | `mode: 'iframe'`: permit `'allow-same-origin'`, which removes the origin boundary |
 | `onFrame` | `(iframe) => void` | -- | `mode: 'iframe'`: called with every new frame (first and after each restart) before it is attached |
+| `network` | `{ fetch?, allowedHosts?, credentials? }` | unset | `worker`, `node-worker`, `iframe`: install a global `fetch` in the sandbox that sends every request through the host function (the gated `fetch` capability). **Unset: no `fetch` in worker modes** (unchanged). See [Mediated network](#mediated-network-network). |
 
 **Returns (Worker mode):** `Promise<{ evaluate, defineModule, dispose, stats, isDisposed }>`. `mode: 'iframe'` adds `iframe`, the live `HTMLIFrameElement` (`null` after `dispose()`, replaced after a restart; see [`mode: 'iframe'`](#mode-iframe)).
 
@@ -397,7 +439,7 @@ registry.dispose();                                  // revokes blob URLs / drop
 
 ### `createNetworkFetch(allowedHosts?, fetchFn?)`
 
-Creates a fetch function that checks the request hostname against an allowlist before calling through. Useful for keeping cooperative code pointed at the hosts you intend -- **not redirect-safe** (see [Security model](#security-model)): an allowlisted host that responds with a redirect is followed without re-checking the final URL.
+Creates a fetch function that checks the request hostname against an allowlist before calling through. Requests are made with `redirect: 'manual'` and any redirect response is rejected, so an allowlisted host cannot send the caller elsewhere (see [Security model](#security-model)). It is what `network: { allowedHosts }` puts in front of the sandbox's `fetch`.
 
 ```js
 import { createNetworkFetch } from '@johnhenry/andbox';
@@ -415,9 +457,9 @@ Creates an async iterable stream for console output capture.
 
 Promise and error utilities used internally, also available for consumers.
 
-### `makeWorkerSource()`
+### `makeWorkerSource(options?)`
 
-Returns the Worker script source code as a string (useful for custom Worker setups).
+Returns the Worker script source code as a string (useful for custom Worker setups). `makeWorkerSource({ networkFetch: true })` is the variant `network` uses: `fetch` is the host-backed shim, which calls the host's `fetch` capability (your host must answer `capabilityCall` messages for it, as `createSandbox()` does).
 
 ### `createSandbox({ mode: 'service-worker', ... })`
 
@@ -497,8 +539,9 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 
 **What is still yours:**
 
-- **Worker-global APIs: partly removed, not contained.** Since 0.1.0 the worker prelude deletes `fetch`, `WebSocket`, `WebSocketStream`, `WebTransport`, `EventSource`, `XMLHttpRequest`, `Worker`, `SharedWorker`, `importScripts`, `indexedDB`, `caches`, `BroadcastChannel`, `postMessage` and `self` from the global scope before any evaluated code runs (after the runtime has captured what it needs), shadows those names for evaluated code, and gives evaluated code a throwaway `this`. A script no longer gets them by name, through `globalThis`, indirect `eval` or `Function`. **This is hardening, not a boundary, and a Worker is not a security boundary.** Still reachable: the platform `import()` operator (syntax, it cannot be deleted or shadowed: it can fetch and execute remote code and is an exfiltration channel; `allowedImportHosts` only governs `sandboxImport()`), timing and `SharedArrayBuffer`/`Atomics` side channels, anything the engine or platform adds later that is not on the list above (a deny-list can only ever be incomplete), and under Node `process`, `require` and the rest of the Node API (use `nodeWorker.permissions`, and see [Node](#node)). Everything shares the Worker's realm and heap, so any prototype or intrinsic the code mutates is shared with the runtime. A different isolation primitive is required for hostile code: [`mode: 'wasm'`](#mode-wasm) (QuickJS in WebAssembly, no ambient authority) or a cross-origin iframe with a strict CSP. See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
+- **Worker-global APIs: partly removed, not contained.** Since 0.1.0 the worker prelude deletes `fetch`, `WebSocket`, `WebSocketStream`, `WebTransport`, `EventSource`, `XMLHttpRequest`, `Worker`, `SharedWorker`, `importScripts`, `indexedDB`, `caches`, `BroadcastChannel`, `postMessage` and `self` from the global scope before any evaluated code runs (after the runtime has captured what it needs; with `network` set, `fetch` is replaced by the host-backed shim instead), shadows those names for evaluated code, and gives evaluated code a throwaway `this`. A script no longer gets them by name, through `globalThis`, indirect `eval` or `Function`. **This is hardening, not a boundary, and a Worker is not a security boundary.** Still reachable: the platform `import()` operator (syntax, it cannot be deleted or shadowed: it can fetch and execute remote code and is an exfiltration channel; `allowedImportHosts` only governs `sandboxImport()`), timing and `SharedArrayBuffer`/`Atomics` side channels, anything the engine or platform adds later that is not on the list above (a deny-list can only ever be incomplete), and under Node `process`, `require` and the rest of the Node API (use `nodeWorker.permissions`, and see [Node](#node)). Everything shares the Worker's realm and heap, so any prototype or intrinsic the code mutates is shared with the runtime. A different isolation primitive is required for hostile code: [`mode: 'wasm'`](#mode-wasm) (QuickJS in WebAssembly, no ambient authority) or a cross-origin iframe with a strict CSP. See [andbox#10](https://github.com/johnhenry/andbox/issues/10).
 - **`sandboxImport()` remote imports: allowed unless `allowedImportHosts` is provided, and only `sandboxImport()` is governed.** With `allowedImportHosts` unset, absolute and protocol-relative `http(s)` specifiers load from any host (0.1.0 denied them by default; 0.1.1 reverted that). Pass `allowedImportHosts: [...]` to restrict to those hostnames plus `baseURL`'s own host (refused with `Import denied: <host> is not in allowedImportHosts`), or `allowedImportHosts: []` to deny all remote imports. Import-map targets and virtual modules are host-authored and unaffected. The check cannot see inside a module once loaded (its own static `import`s) and cannot stop the platform `import()` operator (see the previous item). `mode: 'wasm'` never fetches URLs at all. See [andbox#7](https://github.com/johnhenry/andbox/issues/7).
+- **`network` narrows `fetch` to what your host function allows; it does not close the other routes out.** With `network` set, the sandbox's global `fetch` is a shim: each request goes to your function through the gated `fetch` capability, http(s) only, with `credentials` (default `'omit'`) chosen by the host and `Set-Cookie` withheld. That is a policy point for well-behaved code and the libraries it imports, not a wall: in worker mode the platform `import()` operator can still fetch (and run) arbitrary URLs and carry data out in them, as can `sandboxImport()` unless `allowedImportHosts` restricts it; in iframe mode the frame's own `XMLHttpRequest`, `WebSocket`, `<img>`, `<form>` and `import()` remain unless `csp` blocks them. Your function is what talks to the network on the sandbox's behalf with the host's network position (a server-side host can reach your internal network): validate URLs there, or use `allowedHosts`, and do not forward the sandbox's headers to hosts that trust them blindly. See [Mediated network](#mediated-network-network) and [andbox#39](https://github.com/johnhenry/andbox/issues/39).
 - **A timeout cannot undo in-flight host-side effects; it can ask them to stop.** When the Worker is terminated (timeout, an aborted `evaluate()`, `dispose()`, a crash) every capability call still in flight sees `this.signal` abort, and its late result is dropped rather than delivered. Cancellation is cooperative: a capability that ignores `this.signal` still runs to completion on the host. Write effectful capabilities as `function`s (not arrows) and pass the signal on (`fetch(url, { signal: this.signal })`), and keep them idempotent. In `mode: 'wasm'`, a cooperative `deadlineMs` ends the evaluation without terminating the Worker, so the signal does not abort in that case. See [andbox#8](https://github.com/johnhenry/andbox/issues/8).
 - **`mode: 'iframe'`: the origin boundary is the whole guarantee.** Still yours:
   - **Network.** The frame has `fetch`, `WebSocket`, `import()`, `<img>`, `<form>` and so on, as a `null`-origin client: it can exfiltrate anything it was given or computed, and reach any server that answers cross-origin requests. Pass a `csp` (`default-src 'none'` plus what the code needs) to restrict it.
@@ -519,7 +562,7 @@ What each mode is built to stop, and what it is not. "Hostile" means code active
 | | `worker` / `node-worker` | `wasm` | `iframe` |
 |---|---|---|---|
 | **Runs in** | The Worker's own JS engine (`new Function`) | QuickJS-ng compiled to WebAssembly, inside the Worker / worker thread | The browser's JS engine, in a sandboxed opaque-origin frame (`new Function` in the frame's realm) |
-| **Reaching `fetch`, `WebSocket`, `importScripts`, `indexedDB`, `postMessage`** | Removed from the global scope by the prelude (0.1.0), so not reachable by name or via `globalThis`/`eval`/`Function`. Deny-list hardening only: `import()`, timing channels and (Node) `process`/`require` remain. | Not possible. The engine has no such globals, and `constructor`/`eval`/`Function` chains only reach the guest realm. | Available, as the frame's own (`null`-origin) APIs; restrict the network with `csp`. Your page, cookies and storage are not reachable (`SecurityError`). |
+| **Reaching `fetch`, `WebSocket`, `importScripts`, `indexedDB`, `postMessage`** | Removed from the global scope by the prelude (0.1.0), so not reachable by name or via `globalThis`/`eval`/`Function`; with `network`, `fetch` is a shim that goes through your host function. Deny-list hardening only: `import()`, timing channels and (Node) `process`/`require` remain. | Not possible. The engine has no such globals, and `constructor`/`eval`/`Function` chains only reach the guest realm. | Available, as the frame's own (`null`-origin) APIs (with `network`, `fetch` is the host-backed shim); restrict the network with `csp`. Your page, cookies and storage are not reachable (`SecurityError`). |
 | **Forging protocol messages to the host** | `postMessage`/`self` are removed; ids are random UUIDs and each `result` must echo a per-evaluate nonce. | Not possible. The guest has no `postMessage` or `self`. | Only over its own `MessagePort`, with the same random ids and nonce; the host accepts nothing else from the frame. |
 | **`sandboxImport` of arbitrary URLs / Node builtins** | Remote `http(s)` URLs allowed unless `allowedImportHosts` is provided (then only listed hosts; `[]` denies all); the raw `import()` operator is still unrestricted (browser), and Node builtins are blocked only with `nodeWorker.permissions` (Node). | Refused: only virtual modules resolve; no URL is fetched. | As worker mode (`allowedImportHosts` governs `sandboxImport()` only); requests are cross-origin from `null`. `csp` can restrict `import()` too. |
 | **Prototype-chain names via `host.call`** | Closed by the capability gate (`Object.create(null)`). | Same gate, plus the guest never sees host objects. | Same gate; separate realm, so no shared intrinsics. |

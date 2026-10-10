@@ -18,6 +18,7 @@ import { makeDeferred, makeTimeoutError, makeAbortError } from './deferred.mjs';
 import { DEFAULT_TIMEOUT_MS } from './constants.mjs';
 import { isNodeRuntime, createNodeWorkerFactory } from './node-worker.mjs';
 import { normalizeIframeOptions, createIframeFactory, makeIframeRuntimeSource } from './iframe-host.mjs';
+import { createFetchCapability } from './network-policy.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
@@ -312,9 +313,12 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {string[]} [iframeSandbox] - mode: 'iframe': extra sandbox tokens ('allow-same-origin' needs dangerouslyAllowSameOrigin)
  * @property {boolean} [dangerouslyAllowSameOrigin] - mode: 'iframe': permit 'allow-same-origin' (removes the origin boundary)
  * @property {(iframe: HTMLIFrameElement) => void} [onFrame] - mode: 'iframe': called with every new frame before it is attached
+ * @property {{ fetch?: Function, allowedHosts?: string[], credentials?: RequestCredentials }} [network] - worker, node-worker and iframe modes: install a global `fetch` in the sandbox that goes through the host (andbox#39)
  */
 
 const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'iframe', 'inline', 'data-uri', 'service-worker'];
+/** Modes whose runtime can install the host-backed `fetch` (`network`, andbox#39). */
+const NETWORK_MODES = ['worker', 'node-worker', 'iframe'];
 
 /**
  * Create a new sandboxed runtime.
@@ -344,6 +348,13 @@ export function createSandbox(options = {}) {
     throw new Error(
       `Unknown sandbox mode ${typeof mode === 'string' ? `'${mode}'` : String(mode)}. ` +
       `Supported modes: ${SUPPORTED_MODES.map((m) => `'${m}'`).join(', ')}.`
+    );
+  }
+  if (options.network !== undefined && !NETWORK_MODES.includes(mode)) {
+    // An option that silently does nothing is worse than an error.
+    throw new Error(
+      `The network option applies to ${NETWORK_MODES.map((m) => `mode: '${m}'`).join(', ')}, not mode: '${mode}'.` +
+      (mode === 'wasm' ? " The wasm engine has no fetch; expose a capability and call it with host.call()." : '')
     );
   }
   if (mode === 'inline') return createInlineSandbox(options);
@@ -437,6 +448,7 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     nodeWorker,
     unref = false,
     allowedImportHosts,
+    network,
   } = options;
 
   // undefined = unset: remote imports allowed. An array (even empty) restricts.
@@ -489,8 +501,22 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     wasmConfig = await resolveWasmConfig(options, baseURL, usingNode);
   }
 
+  // `network` (andbox#39): the sandbox's global fetch calls the host's `fetch`
+  // capability, which goes through the same gate and `policy` as the others.
+  let gatedCapabilities = capabilities;
+  if (network !== undefined) {
+    if (Object.prototype.hasOwnProperty.call(capabilities, 'fetch')) {
+      throw new Error(
+        "capabilities.fetch and the network option both define the 'fetch' capability; " +
+        'pass your function as network.fetch instead.'
+      );
+    }
+    gatedCapabilities = { ...capabilities, fetch: createFetchCapability(network) };
+  }
+  const networkFetch = network !== undefined;
+
   // Gate capabilities with rate limits
-  const { lookup: lookupCapability, stats: gateStats } = gateCapabilities(capabilities, policy);
+  const { lookup: lookupCapability, stats: gateStats } = gateCapabilities(gatedCapabilities, policy);
 
   // Console handler — mutable so evaluate() can swap per-call
   let activeConsoleHandler = onConsole || null;
@@ -524,7 +550,9 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
 
   function createWorker() {
     workerAbort = new AbortController();
-    const source = isWasm ? makeWasmWorkerSource() : isIframe ? makeIframeRuntimeSource() : makeWorkerSource();
+    const source = isWasm
+      ? makeWasmWorkerSource()
+      : isIframe ? makeIframeRuntimeSource({ networkFetch }) : makeWorkerSource({ networkFetch });
     if (workerFactory) {
       worker = workerFactory(source);
       attachWorkerHandlers();

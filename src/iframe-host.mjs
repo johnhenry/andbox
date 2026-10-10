@@ -27,9 +27,13 @@ const OFFSCREEN_STYLE =
 /** Attributes andbox owns on the frame; never copied onto a replacement frame. */
 const OWNED_ATTRIBUTES = new Set(['srcdoc', 'src', 'sandbox']);
 
-/** The runtime script the frame runs: Worker mode's, minus the global lockdown. */
-export function makeIframeRuntimeSource() {
-  return makeRuntimeSource({ lockdown: false });
+/**
+ * The runtime script the frame runs: Worker mode's, minus the global lockdown.
+ * @param {{ networkFetch?: boolean }} [options]  `networkFetch`: replace the
+ *   frame's `fetch` with the host-backed one (`createSandbox({ network })`).
+ */
+export function makeIframeRuntimeSource({ networkFetch = false } = {}) {
+  return makeRuntimeSource({ lockdown: false, networkFetch });
 }
 
 /**

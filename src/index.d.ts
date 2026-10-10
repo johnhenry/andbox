@@ -216,6 +216,62 @@ export declare function createNetworkFetch(
   fetchFn?: typeof globalThis.fetch,
 ): (url: string, init?: RequestInit) => Promise<Response>;
 
+// ── network (createSandbox({ network }), andbox#39) ──
+
+/**
+ * What the host function in `network.fetch` receives as `init`. Built by
+ * andbox from the sandbox's request after validation; `credentials` and
+ * `signal` are always the host's.
+ */
+export interface SandboxFetchInit {
+  method: string;
+  headers: Headers;
+  /**
+   * A string body as given; any other body as a `Uint8Array` (typed as
+   * `BufferSource` so `init` can be passed straight to `fetch`). Absent for
+   * GET/HEAD and empty bodies.
+   */
+  body?: string | BufferSource;
+  redirect?: RequestRedirect;
+  /** `network.credentials` (default `'omit'`); the sandbox cannot change it. */
+  credentials: RequestCredentials;
+  /** Aborts when the sandbox's Worker/frame is terminated (timeout, abort, dispose). */
+  signal?: AbortSignal;
+}
+
+/** A plain-object reply a `network.fetch` host function may return instead of a `Response`. */
+export interface SandboxFetchReply {
+  /** 200-599. Default 200. */
+  status?: number;
+  statusText?: string;
+  headers?: HeadersInit;
+  body?: string | ArrayBuffer | ArrayBufferView | Blob | null;
+  /** Default: the request URL. */
+  url?: string;
+  redirected?: boolean;
+}
+
+/** `createSandbox({ network })`: a host-backed global `fetch` inside the sandbox. */
+export interface SandboxNetworkOptions {
+  /**
+   * Called on the host for every request the sandbox's `fetch` makes, through
+   * the gated `fetch` capability (`policy.capabilities.fetch` applies). The
+   * URL is always absolute http(s). Return a `Response` or a plain reply.
+   * Called without a `this`, so the platform `fetch` itself can be passed.
+   * Required unless `allowedHosts` is given.
+   */
+  fetch?: (url: string, init: SandboxFetchInit) =>
+    Response | SandboxFetchReply | Promise<Response | SandboxFetchReply>;
+  /**
+   * Put `createNetworkFetch(allowedHosts, fetch)` in front: other hosts and
+   * any redirect are refused. Without `fetch` it wraps the host's global
+   * `fetch`. Must not be empty.
+   */
+  allowedHosts?: string[];
+  /** `init.credentials` for every request. Default `'omit'`. */
+  credentials?: RequestCredentials;
+}
+
 // ── stdio ──
 
 /** An async iterable stdio stream with push/end controls. */
@@ -243,9 +299,12 @@ export declare function createStdio(): StdioStream;
  * from the host, and sends configured, moduleDefined, result, capabilityCall,
  * and console messages back.
  *
+ * @param options.networkFetch  Install the host-backed global `fetch` shim
+ *   (what `createSandbox({ network })` uses). It calls the host's `fetch`
+ *   capability. Default false: `fetch` is removed like the other network globals.
  * @returns The complete Worker script source code as a string.
  */
-export declare function makeWorkerSource(): string;
+export declare function makeWorkerSource(options?: { networkFetch?: boolean }): string;
 
 // ── service-worker-source ──
 
@@ -412,6 +471,16 @@ export interface SandboxOptions {
    * wasm mode is unavailable.
    */
   untrusted?: boolean;
+  /**
+   * `worker`, `node-worker` and `iframe` modes (throws in `wasm`): install a
+   * global `fetch` in the sandbox that sends each request to `network.fetch`
+   * on the host, through the gated `fetch` capability (andbox#39). http(s)
+   * only; `credentials` is the host's choice. Other network globals stay
+   * locked in worker modes; the platform `import()` operator is not affected.
+   * Unset (default): worker modes have no `fetch`. Conflicts with a
+   * capability named `fetch`.
+   */
+  network?: SandboxNetworkOptions;
 }
 
 /** Options for the built-in Node worker_threads mode (`nodeWorker`). */
