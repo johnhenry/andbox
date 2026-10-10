@@ -295,6 +295,141 @@ export interface SandboxNetworkOptions {
   credentials?: RequestCredentials;
 }
 
+// ── bridges (createSandbox({ bridges }), andbox#46) ──
+
+/** Per-sandbox limits of one bridge. 0 = unlimited. */
+export interface BridgeLimits {
+  /** Live handles at a time. Default 32 (chromeAI: 8). */
+  maxHandles?: number;
+  /** Open streams at a time. Default 8 (chromeAI: 4). */
+  maxStreams?: number;
+  /** Approximate size of one result or stream chunk (strings as UTF-8, binary by byteLength). Default 0. */
+  maxResultBytes?: number;
+  /** Wall-clock time for one call; for a stream method, until the stream ends. Default 0. */
+  timeoutMs?: number;
+}
+
+/** Defaults for {@link BridgeLimits}. */
+export declare const DEFAULT_BRIDGE_LIMITS: Readonly<Required<BridgeLimits>>;
+
+/** An opaque reference to a host object, from `ctx.handle()`. Return it (or put it in a result). */
+export interface BridgeHandleRef<T = unknown> {
+  readonly type: string;
+  readonly target: T;
+}
+
+/** What every bridge method receives as its first argument. */
+export interface BridgeContext<State = any, Target = any> {
+  /** The bridge's name (its global in the sandbox). */
+  bridge: string;
+  /** `'chat.create'` for an api method, `'Session.ask'` for a handle method. */
+  method: string;
+  /**
+   * Aborts when the sandbox's AbortSignal for this call fires, the call times
+   * out (`limits.timeoutMs`), its handle is destroyed, the stream is
+   * cancelled, or the sandbox's Worker/frame is terminated. Pass it on.
+   */
+  signal: AbortSignal;
+  /** Per-sandbox state from `createState()` (lives as long as the sandbox, across restarts). */
+  state: State;
+  /** Handle methods: the host object the sandbox's handle refers to. */
+  target: Target;
+  /** Wrap a host object so the sandbox gets a handle to it (type: a key of `handles`). */
+  handle<T>(type: string, target: T): BridgeHandleRef<T>;
+}
+
+/**
+ * A bridge method. Arguments arrive by structured clone, with sandbox
+ * functions replaced by async proxies (reverse calls into the sandbox),
+ * AbortSignals by `ctx.signal`, and handles by their host objects.
+ */
+export type BridgeMethodFn<State = any, Target = any> = (ctx: BridgeContext<State, Target>, ...args: any[]) => unknown;
+
+/** The activation a method needs: `true`/`'transient'` (a gesture in the last few seconds) or `'sticky'` (any gesture since load). */
+export type BridgeActivation = boolean | 'transient' | 'sticky';
+
+export interface BridgeMethodSpec<State = any, Target = any> {
+  call: BridgeMethodFn<State, Target>;
+  /** Returns a ReadableStream / (async) iterable; the sandbox gets a ReadableStream at once. */
+  stream?: boolean;
+  /** Returns a handle: `limits.maxHandles` is checked before the method runs. */
+  handle?: boolean;
+  /** Needs page user activation; a function decides per call (e.g. only when a download is needed). */
+  requiresUserActivation?: BridgeActivation | ((ctx: BridgeContext<State, Target>, ...args: any[]) => BridgeActivation | Promise<BridgeActivation>);
+}
+
+export type BridgeMethod<State = any, Target = any> = BridgeMethodFn<State, Target> | BridgeMethodSpec<State, Target>;
+
+/** A tree of namespaces and methods: `{ chat: { create, list } }` becomes `svc.chat.create()`. */
+export interface BridgeApi<State = any> {
+  [name: string]: BridgeMethod<State> | BridgeApi<State>;
+}
+
+/** A host object type the sandbox holds handles to. */
+export interface BridgeHandleType<State = any, Target = any> {
+  /** Methods callable on the sandbox's handle; `ctx.target` is the host object. */
+  methods?: Record<string, BridgeMethod<State, Target>>;
+  /** Properties copied to the sandbox (primitives and arrays of primitives) with the handle and after every call. */
+  props?: string[];
+  /** Release the host object: on handle.destroy(), and for every live handle when the sandbox is disposed, restarted or killed. */
+  destroy?: (target: Target) => void | Promise<void>;
+}
+
+/** What `onRequest` sees for every bridge method call (not for destroy/cancel/abort). */
+export interface BridgeRequest {
+  bridge: string;
+  /** `'chat.create'` or `'Session.ask'`; the gate name is `${bridge}.${method}`. */
+  method: string;
+  /** Decoded arguments (sandbox functions are proxies; signals are the call's signal). */
+  args: unknown[];
+  handle: { id: string; type: string } | null;
+  /** The activation the method needs for this call, or false. */
+  requiresUserActivation: false | 'transient' | 'sticky';
+  /** The page's `navigator.userActivation` now; null where the platform has none (Node). */
+  userActivation: { isActive: boolean; hasBeenActive: boolean } | null;
+  /** Aborts when the call does (the sandbox gave up, timed out or was terminated): close your consent UI. */
+  signal: AbortSignal;
+}
+
+export interface BridgeDefinition<State = any> {
+  /** Methods and namespaces of the sandbox global. */
+  api?: BridgeApi<State>;
+  /** Host object types, by name. A handle type cannot share a name with an api member. */
+  handles?: Record<string, BridgeHandleType<State>>;
+  limits?: BridgeLimits;
+  /**
+   * Consent hook, asked on the host before every method call. Only `true`
+   * (or a promise of it) allows; anything else, or a throw, rejects the call
+   * in the sandbox with `NotAllowedError`. It may wait for the user.
+   */
+  onRequest?: (request: BridgeRequest) => boolean | Promise<boolean>;
+  /** Per-sandbox state (`ctx.state`), created once per sandbox. */
+  createState?: () => State;
+  /** Extra fields for `sandbox.stats().bridges[name]`. */
+  stats?: (state: State) => Record<string, unknown>;
+  /**
+   * Sandbox-side adapter: a self-contained function (stringified; no outside
+   * references) called in the sandbox with the generated global and
+   * `clientOptions`; returns the global to install.
+   */
+  client?: ((api: any, options: any) => any) | string;
+  /** JSON passed to `client` in the sandbox. */
+  clientOptions?: unknown;
+  /** Extra sandbox globals aliasing paths of the api: `{ LanguageModel: 'languageModel' }`. */
+  globals?: Record<string, string>;
+}
+
+/** Check a bridge definition (throws a TypeError) and return it unchanged. */
+export declare function defineBridge<State = any>(definition: BridgeDefinition<State>): BridgeDefinition<State>;
+
+/** `sandbox.stats().bridges[name]`. */
+export interface BridgeStats {
+  handles: number;
+  streams: number;
+  pendingCalls: number;
+  [extra: string]: unknown;
+}
+
 // ── stdio ──
 
 /** An async iterable stdio stream with push/end controls. */
@@ -325,9 +460,11 @@ export declare function createStdio(): StdioStream;
  * @param options.networkFetch  Install the host-backed global `fetch` shim
  *   (what `createSandbox({ network })` uses). It calls the host's `fetch`
  *   capability. Default false: `fetch` is removed like the other network globals.
+ * @param options.bridges  Include the bridge client (`createSandbox({ bridges })`);
+ *   the globals are built from the manifests sent with `configure`. Default false.
  * @returns The complete Worker script source code as a string.
  */
-export declare function makeWorkerSource(options?: { networkFetch?: boolean }): string;
+export declare function makeWorkerSource(options?: { networkFetch?: boolean; bridges?: boolean }): string;
 
 // ── service-worker-source ──
 
@@ -505,6 +642,17 @@ export interface SandboxOptions {
    * capability named `fetch`.
    */
   network?: SandboxNetworkOptions;
+  /**
+   * `worker`, `node-worker` and `iframe` modes (throws in the others): one
+   * sandbox global per entry that proxies a host API (andbox#46). Host
+   * objects never cross: the sandbox holds opaque handles, gets structured
+   * clones, pulls streams chunk by chunk, and its functions run in the
+   * sandbox when the host calls them. Every method call goes through the
+   * capability gate as `${bridge}.${method}` (so `policy` limits it) and
+   * through the bridge's `onRequest`; every handle is destroyed when the
+   * sandbox is disposed, restarted or killed. See `@johnhenry/andbox/bridges/chrome-ai`.
+   */
+  bridges?: Record<string, BridgeDefinition>;
 }
 
 /** Options for the built-in Node worker_threads mode (`nodeWorker`). */
@@ -557,6 +705,8 @@ export interface SandboxStats {
   pendingEvaluations: number;
   virtualModules: string[];
   gate: GateStatsResult;
+  /** With `bridges`: live handles/streams/calls per bridge, plus the bridge's own `stats()`. */
+  bridges?: Record<string, BridgeStats>;
   /** `mode: 'wasm'` only: interrupt polls used by the most recent evaluate(). */
   fuelUsed?: number;
   /** `mode: 'wasm'` only: peak sampled JS heap bytes seen so far. */

@@ -29,11 +29,12 @@ const OWNED_ATTRIBUTES = new Set(['srcdoc', 'src', 'sandbox']);
 
 /**
  * The runtime script the frame runs: Worker mode's, minus the global lockdown.
- * @param {{ networkFetch?: boolean }} [options]  `networkFetch`: replace the
- *   frame's `fetch` with the host-backed one (`createSandbox({ network })`).
+ * @param {{ networkFetch?: boolean, bridges?: boolean }} [options]  `networkFetch`: replace the
+ *   frame's `fetch` with the host-backed one (`createSandbox({ network })`);
+ *   `bridges`: include the bridge client (`createSandbox({ bridges })`).
  */
-export function makeIframeRuntimeSource({ networkFetch = false } = {}) {
-  return makeRuntimeSource({ lockdown: false, networkFetch });
+export function makeIframeRuntimeSource({ networkFetch = false, bridges = false } = {}) {
+  return makeRuntimeSource({ lockdown: false, networkFetch, bridges });
 }
 
 /**

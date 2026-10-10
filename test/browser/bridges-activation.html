@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>andbox bridges: no user activation</title></head>
+<body>
+<script type="module">
+  // bridges.spec.mjs: runs without page.evaluate(), which Playwright performs
+  // with a user gesture, so the page has never had user activation here.
+  import { createSandbox } from '/src/index.mjs';
+  import { chromeAI } from '/src/bridges/chrome-ai.mjs';
+  import { createFakeChromeAI } from '/test/fixtures/fake-chrome-ai.mjs';
+  const mode = new URLSearchParams(location.search).get('mode') || 'worker';
+  const fake = createFakeChromeAI({ availability: 'downloadable' });
+  const requests = [];
+  const sb = await createSandbox({
+    mode,
+    bridges: { ai: chromeAI({ scope: fake.scope, onRequest: (q) => { requests.push([q.requiresUserActivation, q.userActivation]); return true; } }) },
+  });
+  const value = await sb.evaluate(`try { await ai.languageModel.create(); return 'created'; } catch (e) { return [e.name, e.message]; }`);
+  await sb.dispose();
+  console.log('andbox-activation-result ' + JSON.stringify({ value, requests, created: fake.log.created.length, hasAPI: !!navigator.userActivation }));
+</script>
+</body>
+</html>

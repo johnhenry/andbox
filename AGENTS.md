@@ -101,6 +101,18 @@ CI (`.github/workflows/ci.yml`) runs `npm install`, `npm test`,
   sandboxed frame of the site is alive, which is why the sync-loop browser
   test disposes its probe sandbox first.
 
+- **Bridges (`src/bridge-client.mjs`, `src/bridge-host.mjs`) have two halves
+  that must stay in step.** The client is stringified into the runtime like
+  `installNetworkFetch`, so it must not reference anything outside its body; a
+  bridge definition's `client` adapter has the same rule. Every host object a
+  session holds must be released in `session.close()`, which
+  `terminateWorker()` calls: a new path that creates handles, streams or
+  callbacks needs its cleanup there, and a test in `test/bridges.test.mjs`
+  that disposes/restarts mid-flight. `test/browser/bridges.spec.mjs` is the
+  only coverage of the iframe runtime's bridge client, and Playwright's
+  `page.evaluate()` runs with a user gesture, so activation tests use
+  `test/browser/bridges-activation.html` instead.
+
 ## Definition of done
 
 A change is done when all of the following hold, not just when tests pass:

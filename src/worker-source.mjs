@@ -7,6 +7,8 @@
  * host capabilities.
  */
 
+import { installBridges } from './bridge-client.mjs';
+
 /**
  * The in-sandbox half of `createSandbox({ network })` (andbox#39): installs a
  * global `fetch` that serializes the request, sends it to the host's `fetch`
@@ -134,14 +136,17 @@ function installNetworkFetch(callHost, getBaseURL) {
  * - `capabilityCall`: RPC request to host capability
  * - `console`: Forwarded console output
  *
- * @param {{ networkFetch?: boolean }} [options]
+ * @param {{ networkFetch?: boolean, bridges?: boolean }} [options]
  *   `networkFetch` (default false) installs a global `fetch` that forwards
  *   every request to the host's `fetch` capability (`createSandbox({ network })`,
  *   andbox#39) instead of leaving `fetch` locked.
+ *   `bridges` (default false) includes the bridge client
+ *   (`createSandbox({ bridges })`, andbox#46); the globals themselves are
+ *   built from the manifests the host sends with `configure`.
  * @returns {string} The Worker script source code.
  */
-export function makeWorkerSource({ networkFetch = false } = {}) {
-  return makeRuntimeSource({ lockdown: true, networkFetch });
+export function makeWorkerSource({ networkFetch = false, bridges = false } = {}) {
+  return makeRuntimeSource({ lockdown: true, networkFetch, bridges });
 }
 
 /**
@@ -162,7 +167,7 @@ export function makeWorkerSource({ networkFetch = false } = {}) {
  *   the lockdown list stays removed.
  * @returns {string}
  */
-export function makeRuntimeSource({ lockdown = true, networkFetch = false } = {}) {
+export function makeRuntimeSource({ lockdown = true, networkFetch = false, bridges = false } = {}) {
   const lockedGlobals = lockdown
     ? `[
   ${networkFetch ? '' : "'fetch', "}'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource',
@@ -204,6 +209,9 @@ ${networkFetch ? `// ── Host-backed fetch (andbox#39) ──
 // Replaces the global fetch: every request goes to the host's
 // gated \`fetch\` capability, which decides policy and credentials.
 (${installNetworkFetch.toString()})((name, args) => callCapability(name, args), () => baseURL);
+` : ''}${bridges ? `// ── Bridges (andbox#46) ──
+// Globals that proxy host APIs; installed from the host's manifests on configure.
+const bridgeClient = (${installBridges.toString()})(post);
 ` : ''}// Names shadowed lexically for evaluated code as well (covers environments
 // where a global could not be deleted).
 const SHADOWED = ${shadowed};
@@ -340,7 +348,15 @@ scope.onmessage = async ({ data: msg }) => {
           virtualModules.set(name, src);
         }
       }
-      post({ type: 'configured' });
+${bridges ? `      if (msg.bridges) {
+        try {
+          bridgeClient.install(msg.bridges);
+        } catch (e) {
+          post({ type: 'configured', error: { message: 'Failed to install bridges: ' + (e && e.message ? e.message : e) } });
+          break;
+        }
+      }
+` : ''}      post({ type: 'configured' });
       break;
     }
 
@@ -388,7 +404,12 @@ scope.onmessage = async ({ data: msg }) => {
       break;
     }
 
-    case 'dispose': {
+${bridges ? `    default: {
+      if (typeof msg.type === 'string' && msg.type.startsWith('bridge')) bridgeClient.receive(msg);
+      break;
+    }
+
+` : ''}    case 'dispose': {
       // Reject all pending RPCs
       for (const [id, { reject }] of pendingRpc) {
         reject(new Error('Sandbox disposed'));

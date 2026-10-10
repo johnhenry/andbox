@@ -19,6 +19,7 @@ import { DEFAULT_TIMEOUT_MS } from './constants.mjs';
 import { isNodeRuntime, createNodeWorkerFactory } from './node-worker.mjs';
 import { normalizeIframeOptions, createIframeFactory, makeIframeRuntimeSource } from './iframe-host.mjs';
 import { createFetchCapability, validateNetworkOptions } from './network-policy.mjs';
+import { normalizeBridges, createBridgeHost } from './bridge-host.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
@@ -314,11 +315,14 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {boolean} [dangerouslyAllowSameOrigin] - mode: 'iframe': permit 'allow-same-origin' (removes the origin boundary)
  * @property {(iframe: HTMLIFrameElement) => void} [onFrame] - mode: 'iframe': called with every new frame before it is attached
  * @property {{ allowedHosts: string[] | '*' | ((url: URL) => boolean | Promise<boolean>), fetch?: Function, credentials?: RequestCredentials }} [network] - worker, node-worker and iframe modes: install a global `fetch` in the sandbox that goes through the host (andbox#39); `allowedHosts` is required (andbox#43)
+ * @property {Record<string, object>} [bridges] - worker, node-worker and iframe modes: one global per entry that proxies a host API (handles, streams, abort, callbacks, consent, budgets; andbox#46)
  */
 
 const SUPPORTED_MODES = ['worker', 'node-worker', 'wasm', 'iframe', 'inline', 'data-uri', 'service-worker'];
 /** Modes whose runtime can install the host-backed `fetch` (`network`, andbox#39). */
 const NETWORK_MODES = ['worker', 'node-worker', 'iframe'];
+/** Modes whose runtime can install bridges (`bridges`, andbox#46). */
+const BRIDGE_MODES = NETWORK_MODES;
 
 /**
  * Create a new sandboxed runtime.
@@ -359,6 +363,17 @@ export function createSandbox(options = {}) {
   }
   // Refuse a bad `network` (no allowedHosts, andbox#43) before starting anything.
   if (options.network !== undefined) validateNetworkOptions(options.network);
+  if (options.bridges !== undefined && !BRIDGE_MODES.includes(mode)) {
+    throw new Error(
+      `The bridges option applies to ${BRIDGE_MODES.map((m) => `mode: '${m}'`).join(', ')}, not mode: '${mode}'.` +
+      (mode === 'wasm'
+        ? ' The QuickJS guest has no ReadableStream, AbortSignal or EventTarget and only JSON crosses its boundary; ' +
+          'expose capabilities and call them with host.call().'
+        : '')
+    );
+  }
+  // Refuse a bad bridge definition before starting anything.
+  if (options.bridges !== undefined) normalizeBridges(options.bridges);
   if (mode === 'inline') return createInlineSandbox(options);
   if (mode === 'data-uri') return createDataUriSandbox(options);
   if (mode === 'service-worker') return createServiceWorkerSandbox(options);
@@ -451,6 +466,7 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     unref = false,
     allowedImportHosts,
     network,
+    bridges,
   } = options;
 
   // undefined = unset: remote imports allowed. An array (even empty) restricts.
@@ -517,8 +533,24 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
   }
   const networkFetch = network !== undefined;
 
+  // `bridges` (andbox#46): every bridge method is also an entry in the gate,
+  // so `policy` limits and counts it, but `host.call()` cannot reach it.
+  const bridgeHost = bridges !== undefined ? createBridgeHost(normalizeBridges(bridges)) : null;
+  if (bridgeHost) {
+    for (const name of Object.keys(bridgeHost.gateEntries)) {
+      if (Object.prototype.hasOwnProperty.call(gatedCapabilities, name)) {
+        throw new Error(`The capability '${name}' has the same name as a bridge method; rename the capability.`);
+      }
+    }
+    gatedCapabilities = { ...gatedCapabilities, ...bridgeHost.gateEntries };
+  }
+
   // Gate capabilities with rate limits
-  const { lookup: lookupCapability, stats: gateStats } = gateCapabilities(gatedCapabilities, policy);
+  const { lookup: gateLookup, stats: gateStats } = gateCapabilities(gatedCapabilities, policy);
+  bridgeHost?.useGate(gateLookup);
+  const lookupCapability = bridgeHost
+    ? (name) => (bridgeHost.isGateName(name) ? undefined : gateLookup(name))
+    : gateLookup;
 
   // Console handler — mutable so evaluate() can swap per-call
   let activeConsoleHandler = onConsole || null;
@@ -530,6 +562,8 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
   let workerBlobURL = null;
   // Lifetime of the current Worker; aborted when it is terminated.
   let workerAbort = null;
+  // The current Worker's bridge session: its handles, streams and callbacks.
+  let bridgeSession = null;
 
   // `unref`: the thread only keeps the host process alive while work is in
   // flight (startup, evaluate, defineModule); idle, it lets the process exit.
@@ -554,9 +588,12 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     workerAbort = new AbortController();
     const source = isWasm
       ? makeWasmWorkerSource()
-      : isIframe ? makeIframeRuntimeSource({ networkFetch }) : makeWorkerSource({ networkFetch });
+      : isIframe
+        ? makeIframeRuntimeSource({ networkFetch, bridges: !!bridgeHost })
+        : makeWorkerSource({ networkFetch, bridges: !!bridgeHost });
     if (workerFactory) {
       worker = workerFactory(source);
+      openBridgeSession();
       attachWorkerHandlers();
       worker.onstdio = (stream, text) => activeConsoleHandler?.(stream, text);
       return;
@@ -564,11 +601,29 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     const blob = new Blob([source], { type: 'application/javascript' });
     workerBlobURL = URL.createObjectURL(blob);
     worker = new Worker(workerBlobURL, { type: 'classic' });
+    openBridgeSession();
     attachWorkerHandlers();
   }
 
+  /** Bind a bridge session to the Worker just created (and only to it). */
+  function openBridgeSession() {
+    if (!bridgeHost) return;
+    const target = worker;
+    const signal = workerAbort.signal;
+    bridgeSession = bridgeHost.openSession((message) => {
+      // Throws DataCloneError for an uncloneable value; the session reports it.
+      if (worker !== target || signal.aborted) return;
+      target.postMessage(message);
+    });
+  }
+
   function attachWorkerHandlers() {
+    const session = bridgeSession;
     worker.onmessage = ({ data: msg }) => {
+      if (session && typeof msg?.type === 'string' && msg.type.startsWith('bridge')) {
+        session.receive(msg);
+        return;
+      }
       switch (msg.type) {
         case 'configured':
         case 'moduleDefined':
@@ -631,7 +686,9 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     const handler = ({ data }) => {
       if (data.type === 'configured') {
         worker.removeEventListener('message', handler);
-        if (data.error) {
+        if (data.error && !wasmConfig) {
+          reject(new Error(data.error.message));
+        } else if (data.error) {
           const err = new Error(`Failed to load the WASM engine: ${data.error.message}`);
           err.code = 'ERR_ANDBOX_ENGINE';
           reject(err);
@@ -647,6 +704,7 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
       baseURL,
       allowedImportHosts: importHosts,
       virtualModules: Object.fromEntries(virtualModules),
+      ...(bridgeHost ? { bridges: bridgeHost.manifests } : {}),
       ...(wasmConfig ? { wasm: { ...wasmConfig.engine, memoryBytes: wasmConfig.limits.memoryBytes } } : {}),
     });
     try {
@@ -696,6 +754,12 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
       // ones can cancel the underlying effect (andbox#8).
       workerAbort.abort(new Error('Sandbox worker terminated'));
       workerAbort = null;
+    }
+    if (bridgeSession) {
+      // Destroy every host object the runtime held, cancel its streams and
+      // abort its in-flight bridge calls (andbox#46).
+      bridgeSession.close();
+      bridgeSession = null;
     }
     if (worker) {
       worker.terminate();
@@ -860,6 +924,7 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
       pendingEvaluations: pending.size,
       virtualModules: [...virtualModules.keys()],
       gate: gateStats(),
+      ...(bridgeHost ? { bridges: bridgeHost.stats() } : {}),
       ...(wasmConfig ? { fuelUsed: wasmStats.fuelUsed, peakMemoryBytes: wasmStats.peakMemoryBytes, totalFuelUsed: wasmStats.totalFuelUsed } : {}),
     };
   }
