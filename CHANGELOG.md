@@ -7,7 +7,7 @@
 `fetch` function would fetch: setting `network` meant network access by
 default. From 0.2.0 `network.allowedHosts` is required, so the sandbox has no
 network unless you say which hosts it may reach. Nothing changes if you do
-not use `network`. See [#43](https://github.com/johnhenry/andbox/issues/43).
+not use `network`. See [#43](https://github.com/johnhenry/andbox/issues/43); landed in 9e5c3bd ([#45](https://github.com/johnhenry/andbox/pull/45)).
 
 ### Can I keep `network: { fetch }` alone? No.
 
