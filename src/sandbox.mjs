@@ -552,8 +552,28 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     ? (name) => (bridgeHost.isGateName(name) ? undefined : gateLookup(name))
     : gateLookup;
 
-  // Console handler — mutable so evaluate() can swap per-call
-  let activeConsoleHandler = onConsole || null;
+  // Console routing (andbox#41). Every console message names the evaluate()
+  // call it came from (its `evalId`), so it goes to that call's own
+  // `onConsole` while the call is pending, never to whichever call started
+  // last; otherwise (no per-call handler, or output after the call settled)
+  // to the sandbox-level one. Handlers get `this.consoleId`: the call's
+  // `consoleId` option. Thread stdio (node-worker `captureStdio`) carries no
+  // call, so it goes to the newest pending call's handler, as before.
+  function deliverConsole(evalId, carriedConsoleId, level, args) {
+    const entry = evalId == null ? undefined : pending.get(evalId);
+    const handler = entry?.onConsole ?? onConsole;
+    if (!handler) return;
+    // A pending call's id is the host's own copy; output after the call
+    // settled has only the id the runtime carried with it.
+    const consoleId = entry ? entry.consoleId : carriedConsoleId;
+    handler.call(Object.freeze({ consoleId }), level, ...args);
+  }
+  function deliverStdio(stream, text) {
+    let entry;
+    for (const e of pending.values()) if (e.onConsole) entry = e;
+    const handler = entry?.onConsole ?? onConsole;
+    handler?.call(Object.freeze({ consoleId: entry?.consoleId }), stream, text);
+  }
 
   // Track virtual modules for re-creation on restart
   const virtualModules = new Map();
@@ -595,7 +615,7 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
       worker = workerFactory(source);
       openBridgeSession();
       attachWorkerHandlers();
-      worker.onstdio = (stream, text) => activeConsoleHandler?.(stream, text);
+      worker.onstdio = deliverStdio;
       return;
     }
     const blob = new Blob([source], { type: 'application/javascript' });
@@ -646,6 +666,10 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
               const err = new Error(msg.error?.message || 'Evaluation failed');
               err.name = msg.error?.name || 'Error';
               if (msg.error?.code) err.code = msg.error.code;
+              // The stack as the sandbox saw it (andbox#41): its frames name
+              // the evaluated code (`//# sourceURL=` names included) and its
+              // line numbers, which the host-side `err.stack` cannot.
+              if (typeof msg.error?.stack === 'string') err.sandboxStack = msg.error.stack;
               entry.reject(err);
             }
           }
@@ -658,9 +682,7 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
         }
 
         case 'console': {
-          if (activeConsoleHandler) {
-            activeConsoleHandler(msg.level, ...msg.args);
-          }
+          deliverConsole(msg.evalId, msg.consoleId, msg.level, Array.isArray(msg.args) ? msg.args : []);
           break;
         }
       }
@@ -789,13 +811,21 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
    * Evaluate JavaScript code in the sandbox.
    *
    * @param {string} code - JavaScript code to execute (wrapped in async IIFE).
-   * @param {{ timeoutMs?: number, signal?: AbortSignal, onConsole?: (level: string, ...args: string[]) => void }} [opts]
+   * @param {{ timeoutMs?: number, signal?: AbortSignal, onConsole?: (level: string, ...args: string[]) => void, consoleId?: string | number }} [opts]
+   *   `onConsole` gets this call's console output only (andbox#41); every
+   *   console handler is called with `this.consoleId` set to the `consoleId`
+   *   of the call that logged, including output that arrives after the call
+   *   settled (which goes to the sandbox-level `onConsole`).
    * @returns {Promise<any>} The return value of the code.
    */
   async function evaluate(code, opts = {}) {
     if (disposed) throw new Error('Sandbox is disposed');
     if (wasmConfig) {
       for (const k of ['fuel', 'memoryBytes', 'stackBytes', 'deadlineMs']) checkLimit(k, opts[k]);
+    }
+    const { consoleId } = opts;
+    if (consoleId !== undefined && typeof consoleId !== 'string' && !(typeof consoleId === 'number' && Number.isFinite(consoleId))) {
+      throw new TypeError('evaluate(): consoleId must be a string or a finite number');
     }
     if (!worker || worker.dead) await restartWorker();
     beginOp();
@@ -810,12 +840,6 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     const nonce = crypto.randomUUID() + crypto.randomUUID();
     const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs;
     const { promise, resolve, reject } = makeDeferred();
-
-    // Swap console handler for this evaluation if provided
-    const prevConsoleHandler = activeConsoleHandler;
-    if (opts.onConsole) {
-      activeConsoleHandler = opts.onConsole;
-    }
 
     // mode: 'wasm' -- limits travel with the call. The in-worker deadline
     // (default: this call's timeoutMs) ends a busy loop gracefully; the
@@ -862,14 +886,19 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
       }, { once: true });
     }
 
-    pending.set(id, { resolve, reject, timer, nonce });
-    worker.postMessage({ type: 'evaluate', id, nonce, code, ...(wasmLimits ? { limits: wasmLimits } : {}) });
-
-    // Restore console handler when evaluation completes
-    return promise.finally(() => {
-      if (opts.onConsole) activeConsoleHandler = prevConsoleHandler;
-      endOp();
+    pending.set(id, { resolve, reject, timer, nonce, onConsole: opts.onConsole || null, consoleId });
+    worker.postMessage({
+      type: 'evaluate',
+      id,
+      nonce,
+      code,
+      // The runtime carries it on this call's console messages, so output
+      // after the call settled is still attributed (andbox#41).
+      ...(consoleId !== undefined ? { consoleId } : {}),
+      ...(wasmLimits ? { limits: wasmLimits } : {}),
     });
+
+    return promise.finally(endOp);
   }
 
   /**

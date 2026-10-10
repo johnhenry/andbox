@@ -529,13 +529,30 @@ Evaluates JavaScript code in the sandbox. The code is wrapped in an async IIFE -
 |--------|------|-------------|
 | `timeoutMs` | `number` | Override default timeout |
 | `signal` | `AbortSignal` | Abort evaluation |
-| `onConsole` | `(level, ...args) => void` | Per-call console handler |
+| `onConsole` | `(level, ...args) => void` | Per-call console handler: gets this call's console output only |
+| `consoleId` | `string \| number` | A name for this call's console output: every console handler gets it as `this.consoleId` |
 
 **Inside sandbox code (Worker mode):**
 
 - `host.call(name, ...args)` -- Call a host capability by name
 - `sandboxImport(name)` -- Import a virtual module
 - `console.log/warn/error/info` -- Forwarded to host `onConsole`
+
+**Console attribution (0.3.1).** Calls on one sandbox may overlap, and each call's console output goes to that call's own `onConsole` while it is running, never to whichever call started last ([andbox#41](https://github.com/johnhenry/andbox/issues/41)). Output from a call that passed no `onConsole`, and output that arrives after a call settled (a timer it left behind), goes to the sandbox-level `onConsole`. Every handler is called with `this.consoleId`, the `consoleId` of the call that logged (`undefined` if it gave none), so late output can still be credited (use a `function`, not an arrow):
+
+```js
+const sb = await createSandbox({
+  onConsole(level, ...args) { log(this.consoleId ?? 'sandbox', level, args); },
+});
+await Promise.all([
+  sb.evaluate(codeA, { consoleId: 'pane-a' }),
+  sb.evaluate(codeB, { consoleId: 'pane-b' }),
+]);
+```
+
+What it covers: the `console` andbox gives the evaluated code, including closures that keep it (a timer, a callback) after the call returns. It is attribution, not authentication: the runtime carries the id with each message, so code in the sandbox that holds another call's `console` logs as that call. Thread stdout/stderr (`node-worker`'s `captureStdio`) names no call and goes to the newest running call's handler, as before.
+
+**Errors keep the sandbox's stack (0.3.1).** A rejected `evaluate()` has the error's `name` and `message` (and `code`, when set); `err.stack` is the host's own stack, and `err.sandboxStack` is the stack as the sandbox saw it, with the evaluated code's frames, line numbers and any `//# sourceURL=` names ([andbox#41](https://github.com/johnhenry/andbox/issues/41)). Line numbers count from andbox's wrapper, which puts three lines before your code in the `new Function`-based modes: in V8 (Chrome, Node) line 1 of your code is reported as line 4; other engines may count differently. It is `undefined` when the sandbox reported no stack.
 
 ### `sandbox.defineModule(name, source)`
 

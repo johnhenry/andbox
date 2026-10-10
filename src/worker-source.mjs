@@ -319,7 +319,7 @@ const host = {
 
 // ── Console Forwarding ──
 const originalConsole = { ...console };
-function makeForwardingConsole(evalId) {
+function makeForwardingConsole(evalId, consoleId) {
   return new Proxy(console, {
     get(target, prop) {
       if (['log', 'warn', 'error', 'info', 'debug'].includes(prop)) {
@@ -328,7 +328,7 @@ function makeForwardingConsole(evalId) {
             try { return typeof a === 'object' ? JSON.stringify(a) : String(a); }
             catch { return String(a); }
           });
-          post({ type: 'console', evalId, level: prop, args: serialized });
+          post({ type: 'console', evalId, consoleId, level: prop, args: serialized });
         };
       }
       return target[prop];
@@ -367,7 +367,7 @@ ${bridges ? `      if (msg.bridges) {
     }
 
     case 'evaluate': {
-      const fwdConsole = makeForwardingConsole(msg.id);
+      const fwdConsole = makeForwardingConsole(msg.id, msg.consoleId);
       try {
         // Wrap in async function for top-level await. The newlines before and
         // after the user code matter: without the trailing one, code ending in

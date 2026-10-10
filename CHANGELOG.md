@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.1 — console output goes to the call that logged; errors keep the sandbox stack (2026-10-10)
+
+A fix, plus two additive fields. See [#41](https://github.com/johnhenry/andbox/issues/41).
+
+- **Fixed: overlapping `evaluate()` calls got each other's console output.**
+  The host swapped one active console handler per call, so while two calls
+  were running, output from either went to whichever started last, and a
+  call that settled before a newer one could leave its handler in place for
+  later calls. The runtime already named the call on every console message;
+  the host now routes by it: a call's `onConsole` gets that call's output
+  only, and output from a call without one, or that arrives after the call
+  settled, goes to the sandbox-level `onConsole`. worker, node-worker,
+  iframe and wasm modes. Thread stdio (`captureStdio`) names no call and
+  still goes to the newest running call's handler.
+- **`evaluate(code, { consoleId })`** (a string or finite number): every
+  console handler is called with `this.consoleId` set to the id of the call
+  that logged, also for output after the call settled, so callers that run
+  several things on one sandbox can credit each line (a notebook's panes,
+  say). Attribution, not authentication: the runtime carries the id, so
+  sandboxed code holding another call's `console` logs as that call.
+  `ConsoleContext` type.
+- **`err.sandboxStack`** on a rejected `evaluate()`: the error's stack as the
+  sandbox saw it (the evaluated code's frames, line numbers and
+  `//# sourceURL=` names), which the worker already sent and the host
+  dropped. `err.stack` is unchanged (the host's). `SandboxEvaluationError`
+  type.
+- Tests: `test/console-attribution.test.mjs` (default worker mode and
+  node-worker, under Node) and `test/browser/console-attribution.spec.mjs`
+  (browser Worker and iframe, in Chromium, Firefox and WebKit).
+
 ## 0.3.0 — bridges, and a Chrome built-in AI bridge (2026-10-10)
 
 Additive; nothing changes unless you pass the new `bridges` option. A minor
