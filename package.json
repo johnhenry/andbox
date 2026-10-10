@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/andbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Sandboxed JavaScript runtime with Worker isolation, RPC, import maps, timeouts, and an optional QuickJS-in-WebAssembly mode",
   "main": "./src/index.mjs",
@@ -12,6 +12,10 @@
     },
     "./wasm-engine": {
       "import": "./src/wasm-engine.mjs"
+    },
+    "./bridges/chrome-ai": {
+      "types": "./src/bridges/chrome-ai.d.ts",
+      "import": "./src/bridges/chrome-ai.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -28,11 +32,13 @@
     "example:03": "node examples/03-network-allowlist-blocks-unapproved-hosts.mjs",
     "example:04": "node examples/04-runaway-code-gets-timed-out.mjs",
     "example:05": "node examples/05-virtual-module-registry-resolves-a-multi-file-tree.mjs",
-    "examples": "npm run example:01 && npm run example:02 && npm run example:03 && npm run example:04 && npm run example:05 && npm run example:07",
+    "examples": "npm run example:01 && npm run example:02 && npm run example:03 && npm run example:04 && npm run example:05 && npm run example:07 && npm run example:10",
     "example:07": "node examples/07-wasm-mode-contains-hostile-code.mjs",
     "example:08:build": "node examples/08-wasm-browser/build.mjs",
     "example:08:headless": "node examples/08-wasm-browser/build.mjs && node examples/08-wasm-browser/run-headless.mjs",
-    "example:09:headless": "node examples/09-iframe-browser/run-headless.mjs"
+    "example:09:headless": "node examples/09-iframe-browser/run-headless.mjs",
+    "example:10": "node examples/10-bridges-share-a-host-api.mjs",
+    "example:11:headless": "node examples/11-chrome-ai-browser/run-headless.mjs"
   },
   "keywords": [
     "sandbox",

@@ -23,6 +23,8 @@ Zero dependencies. Uses only Web Workers and standard browser APIs.
 - [`mode: 'wasm'`](#mode-wasm)
 - [`mode: 'iframe'`](#mode-iframe)
 - [Mediated network: `network`](#mediated-network-network)
+- [Bridges: sharing a host API](#bridges-sharing-a-host-api)
+- [Chrome AI bridge](#chrome-ai-bridge)
 - [API](#api)
 - [Execution model](#execution-model)
 - [Security model](#security-model)
@@ -357,6 +359,135 @@ network: { allowedHosts: '*', fetch: myPolicyFetch }
 
 **Limits.** The response body is buffered on the host and copied into the sandbox (no streaming; enforce size limits in your function, for example from `content-length` and `arrayBuffer().byteLength`). Aborting the sandbox-side `signal` rejects the call immediately but does not cancel the host request; terminating the sandbox does (`init.signal`). The rebuilt `Response` has `type: 'default'`. What this does and does not narrow is in the [Security model](#security-model).
 
+## Bridges: sharing a host API
+
+A capability is one function. Some host APIs are more than that: a model session you create, prompt several times and destroy; a stream of chunks; a call you want to cancel; a progress callback. `bridges` (0.3.0, [andbox#46](https://github.com/johnhenry/andbox/issues/46)) shares such an API with sandboxed code **without sharing a host object**. Each entry becomes a global in the sandbox whose methods send structured-clone messages to functions you define on the host. It is the same pattern as [`network`](#mediated-network-network): a sandbox-side shim backed by a gated host side.
+
+```js
+import { createSandbox, defineBridge } from '@johnhenry/andbox';
+
+const notes = defineBridge({            // defineBridge() only validates; a plain object works too
+  api: {
+    // Every method gets a context first: ctx.signal, ctx.state, ctx.handle(), ctx.target.
+    open: { handle: true, call: (ctx, name) => ctx.handle('Notebook', new Notebook(name)) },
+    search: (ctx, query, options) => db.search(query, { signal: ctx.signal }),
+  },
+  handles: {
+    Notebook: {                                   // host objects the sandbox holds handles to
+      methods: {
+        add: (ctx, text) => ctx.target.add(text), // ctx.target is the host object
+        read: { stream: true, call: (ctx) => ctx.target.entries() }, // ReadableStream or (async) iterable
+      },
+      props: ['name', 'size'],                    // copied to the sandbox, refreshed after every call
+      destroy: (notebook) => notebook.close(),    // on handle.destroy() and when the sandbox goes away
+    },
+  },
+  limits: { maxHandles: 4, maxStreams: 2, maxResultBytes: 1_000_000, timeoutMs: 30_000 },
+  onRequest: async ({ method, args, handle }) => askTheUser(method, args), // only `true` allows
+});
+
+const sandbox = await createSandbox({
+  bridges: { notes },
+  policy: { capabilities: { 'notes.Notebook.add': { maxCalls: 100 } } }, // the gate applies per method
+});
+
+await sandbox.evaluate(`
+  const book = await notes.open('ideas');          // a handle: methods, props, destroy()
+  await book.add('hello');
+  for await (const entry of book.read()) console.log(entry); // a ReadableStream, pulled chunk by chunk
+  const c = new AbortController();
+  setTimeout(() => c.abort(), 100);
+  await notes.search('x', { signal: c.signal }).catch((e) => e.name); // 'AbortError'; ctx.signal aborts on the host
+  book.destroy();
+`);
+```
+
+**Inside the sandbox** the global (`notes`, also on `globalThis`, so imported libraries see it) has the `api` tree as nested namespaces of async methods. Arguments and results cross by structured clone (`Map`, `Date`, typed arrays, `Blob` survive; a result that cannot be cloned rejects with `DataCloneError` instead of leaking anything). Host errors reject with their `name` and `message` (a `DOMException` name such as `NotAllowedError` or `QuotaExceededError` becomes a `DOMException`, `TypeError`/`RangeError` stay those types; the host stack never crosses).
+
+- **Handles.** A method that returns `ctx.handle(type, object)` gives the sandbox an ordinary object with the type's methods, its `props` as read-only getters (snapshot values, refreshed after every call on it), `destroy()` and `[Symbol.dispose]`. The host object stays on the host under a random id. A handle can be passed back as an argument (the host method receives the host object). After `destroy()`, calls reject with `InvalidStateError` and pending ones with `AbortError`, as Chrome's AI sessions do. Mark a method `handle: true` so `limits.maxHandles` is checked before it runs (otherwise an over-limit object is destroyed right after it is made).
+- **Streams.** A `stream: true` method returns a `ReadableStream` at once (like `promptStreaming()`), async-iterable in every engine. It is pull-driven: the host reads its stream or iterator only when the sandbox asks for the next chunk, so a slow reader slows the producer. `cancel()`, a `break` out of `for await`, an aborted signal or `limits.timeoutMs` cancel the host stream and abort `ctx.signal`.
+- **Abort.** An `AbortSignal` anywhere in the arguments rejects the call in the sandbox with the signal's reason at once and aborts `ctx.signal` on the host. An already-aborted signal never reaches the host. `ctx.signal` also aborts on timeout, `destroy()` of the handle, and when the Worker/frame is terminated.
+- **Callbacks (reverse calls).** A function in the arguments becomes an async proxy on the host: calling it runs the function **in the sandbox** and resolves with its (cloned) result. It lives as long as the call, or, when the call returned a handle, as long as that handle; after that, and when the sandbox goes away, calling the proxy rejects. Use it for progress events and anything the host must ask the sandbox; never for code you would run on the host.
+
+**On the host**, every method call is a capability call in the [capability gate](#gatecapabilitiescapabilities-policy) named `${bridge}.${method}` (`notes.open`, `notes.Notebook.add`), so `policy` limits it and `stats().gate.perCapability` counts it; `host.call()` cannot reach those names. Then `onRequest` is asked (if given), then the method runs. `stats().bridges.notes` shows live `handles`, `streams` and `pendingCalls`, plus whatever the definition's `stats(state)` returns.
+
+| Definition field | Type | Description |
+|---|---|---|
+| `api` | tree of methods | Namespaces and methods of the global. A method is `(ctx, ...args) => value` or `{ call, stream?, handle?, requiresUserActivation? }`. |
+| `handles` | `{ [type]: { methods?, props?, destroy? } }` | Host object types. `methods` get `ctx.target`; `props` are copied (primitives and arrays of primitives); `destroy(target)` releases it. |
+| `limits` | `{ maxHandles, maxStreams, maxResultBytes, timeoutMs }` | Per sandbox; defaults 32, 8, 0, 0 (0 = unlimited). `maxResultBytes` is approximate (strings as UTF-8, binary by `byteLength`) and applies to each result and stream chunk; `timeoutMs` covers one call, and a stream until it ends (`TimeoutError`). |
+| `onRequest` | `(request) => boolean \| Promise<boolean>` | Consent hook: `{ bridge, method, args, handle, requiresUserActivation, userActivation, signal }`. Only `true` allows; `false`, anything else or a throw rejects in the sandbox with `NotAllowedError` (a thrown error's message is kept). It may wait for the user; `request.signal` aborts if the sandbox gives up. Asked for every method call, not for `destroy()`, cancel or abort. |
+| `createState`, `stats` | functions | Per-sandbox state (`ctx.state`, kept across restarts) and extra `stats()` fields. |
+| `client`, `clientOptions` | function, JSON | A self-contained function run **in the sandbox** with the generated global, to adapt shapes a message cannot carry (the Chrome AI bridge uses it for `monitor`). |
+| `globals` | `{ alias: 'path' }` | Extra sandbox globals pointing into the api, e.g. `{ LanguageModel: 'languageModel' }`. |
+
+**User activation.** Some host APIs need a gesture on the page (Chrome's model download). andbox cannot grant activation, and the sandbox cannot produce it. Mark the method `requiresUserActivation: true | 'transient' | 'sticky'`, or a function `(ctx, ...args)` that decides per call. `onRequest` then sees `requiresUserActivation` and the page's current `userActivation`, and after it allows, andbox checks `navigator.userActivation` and refuses with `NotAllowedError` if the page has none. The way an app satisfies it: show a button and resolve `onRequest` **from its click handler**, so the method runs while the page has activation (sticky activation lasts for the page's lifetime; transient lasts a few seconds). Where the platform has no `navigator.userActivation` (Node), the check is skipped.
+
+**Lifetime.** Handles, streams and callbacks belong to the Worker or frame that made them. When it is terminated (`dispose()`, a timeout or abort of `evaluate()`, a crash, an iframe navigation) every handle's `destroy` runs on the host, every stream is cancelled, every in-flight call's `ctx.signal` aborts, and pending reverse calls reject. The next `evaluate()` runs in a fresh runtime with a fresh global. Keep `defaultTimeoutMs` above your slowest bridge call: a timed-out `evaluate()` destroys the sandbox's handles with the runtime.
+
+**Modes.** `worker`, `node-worker` (the host API just has to exist in Node) and `iframe`. `wasm`, `inline`, `data-uri` and `service-worker` throw if `bridges` is given: the QuickJS guest has no `ReadableStream`, `AbortSignal` or `EventTarget` and only JSON crosses its boundary, so in `wasm` expose capabilities and use `host.call()`. A bridge name or alias must be an identifier that is not a runtime name (`host`, `sandboxImport`, `console`, `fetch`, `self`, ...); method names may not be `then`, `constructor`, `destroy` and the like; a capability with a bridge method's gate name throws.
+
+**Not supported (v1).** Events on handles (`addEventListener` on a session, e.g. Chrome's `contextoverflow`), getters that change between calls without a call (props are snapshots), passing a stream or a function *in a result*, and markers: an argument object with an own `__andbox_bridge__` key is read as a function/signal/handle reference.
+
+## Chrome AI bridge
+
+Chrome's built-in AI APIs (`LanguageModel`, `Summarizer`, `Writer`, `Rewriter`, `Translator`, `LanguageDetector`, `Proofreader`) exist only in Window contexts: not in Workers, and in a sandboxed opaque-origin iframe they are blocked by permissions policy (`availability()` is `'unavailable'`, `create()` throws `NotAllowedError`; measured in Chromium). So sandboxed code can only reach the on-device model through the page. `@johnhenry/andbox/bridges/chrome-ai` is that bridge, with no dependencies:
+
+```js
+import { createSandbox } from '@johnhenry/andbox';
+import { chromeAI } from '@johnhenry/andbox/bridges/chrome-ai';
+
+const sandbox = await createSandbox({
+  bridges: {
+    ai: chromeAI({
+      apis: ['languageModel', 'summarizer'],          // default: all seven
+      budgets: { maxInputTokens: 20_000, maxInputTokensPerCall: 2_000 },
+      onRequest: (request) => consentDialog(request), // e.g. resolve(true) from an "Allow" button's click handler
+    }),
+  },
+  defaultTimeoutMs: 120_000, // model calls are slow; a timed-out evaluate() destroys its sessions
+});
+
+await sandbox.evaluate(`
+  if (await ai.languageModel.availability() === 'unavailable') return null;
+  const session = await ai.languageModel.create({
+    initialPrompts: [{ role: 'system', content: 'Be brief.' }],
+    monitor(m) { m.addEventListener('downloadprogress', (e) => console.log(e.loaded)); },
+  });
+  let text = '';
+  for await (const chunk of session.promptStreaming('Summarize andbox.')) text += chunk;
+  console.log(session.contextUsage, '/', session.contextWindow);
+  session.destroy();
+  return text;
+`);
+```
+
+**In the sandbox**, `ai.languageModel`, `ai.summarizer`, `ai.writer`, `ai.rewriter`, `ai.translator`, `ai.languageDetector` and `ai.proofreader` mirror the platform constructors: `availability(options)`, `create(options)` (plus `params()` for `languageModel` where the host has it, i.e. extensions). `chromeAI({ globals: true })` also installs `LanguageModel`, `Summarizer`, ... as sandbox globals, so code written for the page runs unchanged. Sessions are handles with the platform's methods and attributes:
+
+| API | Methods | Attributes (snapshots) |
+|---|---|---|
+| `languageModel` | `prompt`, `promptStreaming`, `append`, `measureContextUsage`, `measureInputUsage`, `clone`, `destroy` | `contextUsage`, `contextWindow`, `samplingMode`; legacy `inputUsage`, `inputQuota`, `topK`, `temperature` where the host has them |
+| `summarizer`, `writer`, `rewriter` | `summarize`/`write`/`rewrite`, their `...Streaming`, `measureInputUsage`, `destroy` | `sharedContext`, `type`/`tone`, `format`, `length`, `expectedInputLanguages`, `expectedContextLanguages`, `outputLanguage`, `inputQuota` |
+| `translator` | `translate`, `translateStreaming`, `measureInputUsage`, `destroy` | `sourceLanguage`, `targetLanguage`, `inputQuota` |
+| `languageDetector` | `detect`, `measureInputUsage`, `destroy` | `expectedInputLanguages`, `inputQuota` |
+| `proofreader` | `proofread`, `measureInputUsage`, `destroy` | `includeCorrectionTypes`, `includeCorrectionExplanations`, `expectedInputLanguages`, `correctionExplanationLanguage` |
+
+**On the host**, the platform objects are looked up on `globalThis` at call time (`chromeAI({ scope })` substitutes another object, which the tests use for a fake). An API the browser lacks reports `'unavailable'` and its `create()` rejects with `NotSupportedError`; a method the browser lacks rejects with `NotSupportedError`. Every call passes the platform the call's `ctx.signal`, so a sandbox-side `signal`, `session.destroy()`, a timeout or the sandbox going away aborts the model call. Gate names are `ai.languageModel.create`, `ai.LanguageModel.prompt`, `ai.Summarizer.summarize`, ... (`policy.capabilities['ai.LanguageModel.prompt']`). Default limits: 8 live sessions and 4 open streams per sandbox.
+
+- **Consent and the download gesture.** `onRequest` sees every call, e.g. `{ method: 'LanguageModel.prompt', args: ['...'] }`, and can show the prompt text, refuse, or wait. `create()` needs a user gesture when the model is not on disk yet (`availability()` is `'downloadable'`); the bridge then reports `requiresUserActivation: 'sticky'` and refuses with `NotAllowedError` if the page has never had activation. Resolve `onRequest` from a click handler (an "Allow download" button) and the download proceeds. The check is against the page that owns the bridge, and activation is not consent: a click *inside* an `iframe` sandbox also activates its parent page (the HTML spec propagates activation to ancestor frames; measured in WebKit), so sandboxed code that gets the user to click its own button satisfies the activation check. Decide in `onRequest`, with UI the sandbox cannot draw.
+- **Token budgets.** `budgets.maxInputTokensPerCall` and `budgets.maxInputTokens` (per sandbox) are enforced on the host: before every `prompt`, `promptStreaming`, `append`, `summarize`, `write`, `rewrite`, `translate`, `detect` and `proofread`, the input is measured with the session's `measureContextUsage()` (or `measureInputUsage()`), and a call over budget rejects with `QuotaExceededError` (`requested`, `quota`) before it reaches the model. The tokens `initialPrompts` use count at `create()`. Output tokens are not counted (each session's `contextWindow` bounds them). With a budget set, an API that cannot measure (the Proofreader spec has no `measureInputUsage`) rejects instead of running unmetered. `stats().bridges.ai.inputTokens` is the running total.
+- **`monitor`** works as on the page: it is called in the sandbox with an `EventTarget` that receives `downloadprogress` events (`loaded` 0 to 1, `total` 1; a `ProgressEvent` where the runtime has one), forwarded from the host's monitor as reverse calls.
+
+**Differences from the platform API.**
+
+- `create()` options and inputs cross by structured clone: images and audio must be cloneable (`Blob`, `ImageBitmap`, `ImageData`, `ArrayBuffer`; not `AudioBuffer`); an `HTMLCanvasElement` or `HTMLImageElement` from an iframe sandbox's document rejects with `DataCloneError`, so convert it first.
+- Attributes are snapshots refreshed after each call on the session; there are no events on sessions (`contextoverflow`/`quotaoverflow` are not forwarded).
+- `measureContextUsage()` and `measureInputUsage()` are both available and call whichever the browser has.
+- **Tool use.** Chrome's Prompt API has no `execute` callback: tool use is open-loop and, as of Chrome 152, behind a flag. The bridge passes tool declarations through, returns `tool-call` content as plain `{ callId, name, arguments }` objects, and turns `tool-response` content you send back into the platform's `LanguageModelToolSuccess`/`LanguageModelToolError`. A tool with an `execute` function is refused with `NotSupportedError` rather than silently ignored; when the platform gains closed-loop tools, bridging `execute` is a reverse call (it would run in the sandbox, never on the host).
+- `samplingMode`, `topK`, `temperature`, `params()`: whatever the host's browser supports (the web ignores `topK`/`temperature`; `params()` exists only in extensions).
+
+**Where it works.** The host must be a page (Window) where the API is enabled: Chrome desktop 138+ for Summarizer, Translator and LanguageDetector, 148+ for the Prompt API on the web; Writer, Rewriter and Proofreader are origin-trial or flag only. A page inside a cross-origin iframe needs `allow="language-model; summarizer; ..."` delegated to it. `test/browser/bridges.spec.mjs` runs the bridge against a fake `LanguageModel` in Chromium, Firefox and WebKit (CI has no model) and a smoke test against the real API where the browser has it; `examples/11-chrome-ai-browser/` is a working page with a consent prompt.
+
 ## API
 
 ### `createSandbox(options?)`
@@ -386,6 +517,7 @@ Creates a new sandboxed runtime. Returns a promise (Worker, wasm and iframe mode
 | `dangerouslyAllowSameOrigin` | `boolean` | `false` | `mode: 'iframe'`: permit `'allow-same-origin'`, which removes the origin boundary |
 | `onFrame` | `(iframe) => void` | -- | `mode: 'iframe'`: called with every new frame (first and after each restart) before it is attached |
 | `network` | `{ allowedHosts, fetch?, credentials? }` | unset | `worker`, `node-worker`, `iframe`: install a global `fetch` in the sandbox that sends every request through the host function (the gated `fetch` capability). `allowedHosts` is required (a hostname list, a `(url) => boolean` function, or `'*'`); without it `createSandbox()` throws. **Unset: no `fetch` in worker modes** (unchanged). See [Mediated network](#mediated-network-network). |
+| `bridges` | `Record<string, BridgeDefinition>` | unset | `worker`, `node-worker`, `iframe`: one sandbox global per entry that proxies a host API, with handles, streams, abort, callbacks, consent and budgets. See [Bridges](#bridges-sharing-a-host-api) and the [Chrome AI bridge](#chrome-ai-bridge). |
 
 **Returns (Worker mode):** `Promise<{ evaluate, defineModule, dispose, stats, isDisposed }>`. `mode: 'iframe'` adds `iframe`, the live `HTMLIFrameElement` (`null` after `dispose()`, replaced after a restart; see [`mode: 'iframe'`](#mode-iframe)).
 
@@ -474,6 +606,14 @@ await gatedFetch('https://api.example.com/data'); // OK
 await gatedFetch('https://evil.com/steal');        // throws
 ```
 
+### `defineBridge(definition)`
+
+Validates a bridge definition (throws a `TypeError` naming the problem) and returns it unchanged. Optional: `createSandbox({ bridges })` validates too. `DEFAULT_BRIDGE_LIMITS` holds the default `limits`. See [Bridges](#bridges-sharing-a-host-api).
+
+### `chromeAI(options?)` (`@johnhenry/andbox/bridges/chrome-ai`)
+
+The [Chrome AI bridge](#chrome-ai-bridge): `{ apis?, onRequest?, budgets?: { maxInputTokens?, maxInputTokensPerCall? }, limits?, globals?, scope? }`. `CHROME_AI_APIS` lists the API keys.
+
 ### `createStdio()`
 
 Creates an async iterable stream for console output capture.
@@ -561,6 +701,7 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 - **`createNetworkFetch()`'s allowlist is redirect-safe.** Requests are made with `redirect: 'manual'` and any redirect response is rejected outright, so an allowlisted host cannot silently redirect a caller to a non-allowlisted one. Previously fixed; see [andbox#6](https://github.com/johnhenry/andbox/issues/6).
 - **`gateCapabilities()` enforces call/argument-size/concurrency caps per capability**, for cooperative callers that stay within the capabilities you actually granted.
 - **(`mode: 'iframe'`) An opaque origin and a separate realm, enforced by the browser.** The frame is `sandbox="allow-scripts"` without `allow-same-origin` (refused unless `dangerouslyAllowSameOrigin: true`). Its code gets `SecurityError` for `parent.document`, `top.location`, `parent.localStorage` and its own `localStorage`, has no access to your cookies, and shares no objects with your page: everything crossing the boundary is structured-cloned over a `MessagePort`. The port is handed over only after a handshake bound to that frame's own `contentWindow` and a per-frame random token (an `event.origin` of `'null'` alone proves nothing, since every opaque frame has it). Asserted by `test/browser/iframe-mode.spec.mjs`, which runs in Chromium, Firefox and WebKit.
+- **(`bridges`) Host objects never cross.** A bridge sends only structured clones: the sandbox holds random handle ids, never the object; a result that cannot be cloned rejects with `DataCloneError`; host errors cross as `name` and `message` without the stack. Functions the sandbox passes run in the sandbox when the host calls them, never on the host. Every method call goes through the capability gate (`policy`, as `${bridge}.${method}`, unreachable through `host.call()`), then through the bridge's `onRequest`, where only `true` allows; `limits` cap live handles, open streams, result size and call time. Everything a runtime held (handles, streams, callbacks, in-flight calls) is destroyed or aborted on the host when it is terminated: `dispose()`, a timeout or abort, a crash, a frame navigation. Asserted by `test/bridges.test.mjs` and `test/browser/bridges.spec.mjs`. See [Bridges](#bridges-sharing-a-host-api).
 
 **What is still yours:**
 
@@ -569,6 +710,13 @@ andbox is **not** a boundary against code that is actively trying to escape it. 
 - **`network`: no network unless you list hosts.** `network.allowedHosts` is required (0.2.0, [andbox#43](https://github.com/johnhenry/andbox/issues/43)): a list of hostnames, a function asked about every request and redirect hop, or the explicit `'*'`, which hands the whole decision to your `fetch`. Setting `network` without it throws, so it can no longer mean "every host your function will fetch" by omission.
 - **`network` narrows `fetch` to what `allowedHosts` and your host function allow; it does not close the other routes out.** With `network` set, the sandbox's global `fetch` is a shim: each request goes through the gated `fetch` capability, http(s) only, is checked against `allowedHosts` on the host, and reaches your function with `credentials` (default `'omit'`) chosen by the host and `Set-Cookie` withheld. That is a policy point for well-behaved code and the libraries it imports, not a wall: in worker mode the platform `import()` operator can still fetch (and run) arbitrary URLs and carry data out in them, as can `sandboxImport()` unless `allowedImportHosts` restricts it; in iframe mode the frame's own `XMLHttpRequest`, `WebSocket`, `<img>`, `<form>` and `import()` remain unless `csp` blocks them. Your function is what talks to the network on the sandbox's behalf with the host's network position (a server-side host can reach your internal network and cloud metadata endpoints): prefer an `allowedHosts` list, refuse private addresses in a function or `'*'` policy, and do not forward the sandbox's headers to hosts that trust them blindly. With `'*'`, redirects are whatever your `fetch` does. See [Mediated network](#mediated-network-network) and [andbox#39](https://github.com/johnhenry/andbox/issues/39).
 - **A timeout cannot undo in-flight host-side effects; it can ask them to stop.** When the Worker is terminated (timeout, an aborted `evaluate()`, `dispose()`, a crash) every capability call still in flight sees `this.signal` abort, and its late result is dropped rather than delivered. Cancellation is cooperative: a capability that ignores `this.signal` still runs to completion on the host. Write effectful capabilities as `function`s (not arrows) and pass the signal on (`fetch(url, { signal: this.signal })`), and keep them idempotent. In `mode: 'wasm'`, a cooperative `deadlineMs` ends the evaluation without terminating the Worker, so the signal does not abort in that case. See [andbox#8](https://github.com/johnhenry/andbox/issues/8).
+- **`bridges`: the bridged API's own risks are yours.** A bridge narrows *how* sandboxed code reaches a host API, not *what the API does* with what it is given:
+  - **What the API can reach.** Whatever the bridged methods do, the sandbox can make them do, within `onRequest`, `policy` and `limits`. Validate arguments host-side like any capability; the arguments are untrusted input.
+  - **An on-device model is an API that does what its input says.** Code with the Chrome AI bridge can prompt the model with anything the sandbox has: the data you gave it, the page content it was shown, text it built to manipulate the model (prompt injection). Show prompts in `onRequest` when the content matters, and use `budgets` to bound cost.
+  - **Output is untrusted.** Model output (and any bridge result) is data from a source that the sandbox's input steered. Do not render it as HTML, run it or act on it without the same checks as any other untrusted input.
+  - **Tool use.** Open-loop `tool-call` results are requests the model made on the sandbox's behalf; the sandbox decides what to run, inside the sandbox. A future closed-loop `execute` would also run in the sandbox. Nothing about tool use runs on the host unless your code does it.
+  - **Consent UI and user activation.** `onRequest` is only as good as the UI you show. andbox cannot grant user activation, and activation is not consent: a click inside an `iframe` sandbox activates the page too. Put the decision in your own UI, outside any frame the sandbox draws.
+  - **Lifetime.** `destroy` and `ctx.signal` are cooperative: a host method that ignores `ctx.signal` runs to completion (its late result is dropped and any handle in it destroyed), and a host object whose `destroy` throws is forgotten anyway.
 - **`mode: 'iframe'`: the origin boundary is the whole guarantee.** Still yours:
   - **Network.** The frame has `fetch`, `WebSocket`, `import()`, `<img>`, `<form>` and so on, as a `null`-origin client: it can exfiltrate anything it was given or computed, and reach any server that answers cross-origin requests. Pass a `csp` (`default-src 'none'` plus what the code needs) to restrict it.
   - **CPU and memory.** An `await`-based hang is killed on time; a synchronous loop is killable only where the browser runs the frame out of process, and in Chrome only while no other frame from your site shares that process. WebKit/Safari (and Chromium without full site isolation) run the frame on your page's thread, where a busy loop freezes your page. No memory cap. See [`mode: 'iframe'`](#mode-iframe).

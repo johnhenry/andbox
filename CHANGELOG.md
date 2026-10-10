@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.3.0 — bridges, and a Chrome built-in AI bridge (2026-10-10)
+
+Additive; nothing changes unless you pass the new `bridges` option. A minor
+bump rather than a patch because it adds a public subpath export
+(`@johnhenry/andbox/bridges/chrome-ai`), a new message family in the runtime
+protocol and a security-relevant surface that `^0.2.x` installs should not
+pick up silently. See [#46](https://github.com/johnhenry/andbox/issues/46).
+
+- **`createSandbox({ bridges })`** (worker, node-worker, iframe): each entry
+  becomes a sandbox global that proxies a host API without sharing a host
+  object. Async methods with structured-clone arguments and results;
+  **handles** to host objects (methods, snapshot props, `destroy()`, a
+  per-sandbox `maxHandles`); **streams** that arrive as `ReadableStream`s,
+  pulled chunk by chunk, with cancel reaching the host; **abort** through any
+  `AbortSignal` in the arguments; **callbacks**: sandbox functions become
+  host-side async proxies that run in the sandbox; a **consent hook**
+  (`onRequest`, only `true` allows) and `requiresUserActivation` for methods
+  that need a page gesture; **budgets**: every method call is a gate entry
+  (`policy.capabilities['svc.Session.ask']`), plus `limits` for handles, open
+  streams, result size and call time. Everything a runtime held is destroyed
+  on the host when it is disposed, restarted or killed. `wasm`, `inline`,
+  `data-uri` and `service-worker` throw if given `bridges`.
+- **`defineBridge()`** and `DEFAULT_BRIDGE_LIMITS` exports;
+  `sandbox.stats().bridges`.
+- **`chromeAI()`** from `@johnhenry/andbox/bridges/chrome-ai`, no
+  dependencies: `ai.languageModel`, `ai.summarizer`, `ai.writer`,
+  `ai.rewriter`, `ai.translator`, `ai.languageDetector`, `ai.proofreader` in
+  the sandbox, mirroring Chrome's built-in AI APIs (sessions as handles,
+  `promptStreaming()` and friends as streams, `monitor` download progress,
+  `measureContextUsage()`/`contextUsage`/`contextWindow` with the legacy
+  names where the browser has them, open-loop tool content converted both
+  ways). Feature-detected on the host; missing APIs report `'unavailable'`.
+  Token budgets (`maxInputTokens`, `maxInputTokensPerCall`) measured before
+  the model runs; `create()` reports `requiresUserActivation: 'sticky'` when
+  the model must be downloaded. These APIs exist only in Window contexts (not
+  Workers; blocked by permissions policy in an opaque-origin iframe), so for
+  sandboxed code the bridge is the only route.
+- `makeWorkerSource({ bridges })`; without it the generated script is unchanged.
+- Docs: README "Bridges", "Chrome AI bridge", Security model items for both.
+  Examples 10 (Node, a fake host API) and 11 (browser, Chrome AI with a
+  consent prompt; `npm run example:11:headless`). Tests:
+  `test/bridges.test.mjs`, `test/chrome-ai-bridge.test.mjs`,
+  `test/browser/bridges.spec.mjs` (worker and iframe, a fake `LanguageModel`,
+  and a real-API smoke test where the browser has it).
+
 ## 0.2.0 — `network` needs `allowedHosts` (2026-10-10)
 
 **Upgrade from `0.1.3` if you use the `network` option.** Since 0.1.3,
