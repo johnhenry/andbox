@@ -517,8 +517,18 @@ export interface EvaluateOptions {
   timeoutMs?: number;
   /** AbortSignal to cancel the evaluation. */
   signal?: AbortSignal;
-  /** Console output handler for this evaluation (overrides sandbox-level handler). */
-  onConsole?: (level: string, ...args: string[]) => void;
+  /**
+   * Console output handler for this evaluation: it gets this call's console
+   * output only, while the call is pending (andbox#41). Output from a call
+   * without one, or after the call settled, goes to the sandbox-level handler.
+   */
+  onConsole?: (this: ConsoleContext, level: string, ...args: string[]) => void;
+  /**
+   * A name for this call's console output: every console handler (this call's
+   * or the sandbox-level one, for output after the call settled) is called
+   * with `this.consoleId` set to it. Attribution, not authentication.
+   */
+  consoleId?: string | number;
   /** `mode: 'wasm'` only: fuel for this call (overrides the sandbox option). */
   fuel?: number;
   /** `mode: 'wasm'` only: JS heap cap in bytes for this call. */
@@ -540,6 +550,25 @@ export interface CapabilityContext {
   name: string;
 }
 
+/**
+ * `this` inside an `onConsole` handler (use a `function`, not an arrow):
+ * `consoleId` is the `consoleId` option of the `evaluate()` call whose code
+ * logged, or `undefined` (none given, or thread stdio).
+ */
+export interface ConsoleContext {
+  readonly consoleId: string | number | undefined;
+}
+
+/**
+ * An error from a failed `evaluate()`. `sandboxStack` is the stack as the
+ * sandbox saw it (the evaluated code's frames, lines and `//# sourceURL=`
+ * names); `stack` is the host's own.
+ */
+export interface SandboxEvaluationError extends Error {
+  code?: string;
+  sandboxStack?: string;
+}
+
 /** Options for createSandbox(). */
 export interface SandboxOptions {
   /** Import map for module resolution inside the sandbox. */
@@ -552,8 +581,11 @@ export interface SandboxOptions {
   baseURL?: string;
   /** Rate limiting policy for capability calls. */
   policy?: GatePolicy;
-  /** Console output handler. Called when sandboxed code uses console.log/warn/error/etc. */
-  onConsole?: (level: string, ...args: string[]) => void;
+  /**
+   * Console output handler. Called when sandboxed code uses console.log/warn/error/etc.
+   * and no per-call `onConsole` is running for it; `this.consoleId` names the call.
+   */
+  onConsole?: (this: ConsoleContext, level: string, ...args: string[]) => void;
   /**
    * Worker mode selection. Omitted/`'worker'` uses a Web Worker, or
    * `node:worker_threads` automatically when run under Node with no global

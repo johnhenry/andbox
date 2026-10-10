@@ -319,7 +319,7 @@ function wasmWorkerMain() {
           if (done) return;
           let args;
           try { args = JSON.parse(ctx.getString(argsH)); } catch { args = []; }
-          self.postMessage({ type: 'console', evalId: msg.id, level: ctx.getString(levelH), args });
+          self.postMessage({ type: 'console', evalId: msg.id, consoleId: msg.consoleId, level: ctx.getString(levelH), args });
         }));
 
         const nativeCall = own(ctx.newFunction('call', (nameH, argsH) => {
