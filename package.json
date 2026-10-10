@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/andbox",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Sandboxed JavaScript runtime with Worker isolation, RPC, import maps, timeouts, and an optional QuickJS-in-WebAssembly mode",
   "main": "./src/index.mjs",
