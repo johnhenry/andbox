@@ -844,17 +844,42 @@ export interface IframeSandboxOptions
    * detached when this returns, andbox attaches it.
    */
   onFrame?: (iframe: HTMLIFrameElement) => void;
+  /**
+   * Hosts the frame may navigate itself to (0.3.2, andbox#50): CSP source
+   * expressions such as `'https://example.com'`, `'example.com'`,
+   * `'*.example.com'`, `'https:'` or `"'self'"`; `[]` allows none.
+   *
+   * The sandboxed frame is then nested in a same-origin wrapper frame
+   * (`srcdoc`, no script) whose CSP is `frame-src` with these hosts. A
+   * frame's own navigation (`location = ...`, a clicked link, a meta refresh)
+   * is checked against that policy before the request is sent; a blocked
+   * one sends nothing, and the frame is replaced as after any navigation.
+   * The wrapper is the element in your page (`sandbox.iframe`, `onFrame`,
+   * `container`); the code's window is `sandbox.frameWindow`, and inside the
+   * frame the host page is `parent.parent`. The wrapper's `allow`,
+   * `allowfullscreen` and `title` are copied to the frame inside it.
+   * Unset: no wrapper (unchanged).
+   */
+  frameSrc?: string[];
 }
 
 /** A sandbox created with `mode: 'iframe'`. */
 export interface IframeSandbox extends Sandbox {
   /**
-   * The live frame element. It is replaced by a new element after a timeout,
+   * The live frame element (with `frameSrc`, the wrapper around the
+   * sandboxed frame). It is replaced by a new element after a timeout,
    * an abort, or the frame navigating/reloading (use `onFrame` to follow
    * replacements), and is `null` after dispose(). Do not move it in the DOM:
    * that reloads the document and loses the sandbox state.
    */
   readonly iframe: HTMLIFrameElement | null;
+  /**
+   * The window of the document the code runs in (0.3.2): `iframe.contentWindow`,
+   * or with `frameSrc` the sandboxed frame's inside the wrapper. Post to it,
+   * and compare `event.source` with it, to talk to the frame directly. It
+   * changes with the frame and is `null` after dispose(). Not enumerable.
+   */
+  readonly frameWindow: Window | null;
 }
 
 /** Options for createSandbox({ mode: 'service-worker' }). */

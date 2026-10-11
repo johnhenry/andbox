@@ -27,6 +27,9 @@ const OFFSCREEN_STYLE =
 /** Attributes andbox owns on the frame; never copied onto a replacement frame. */
 const OWNED_ATTRIBUTES = new Set(['srcdoc', 'src', 'sandbox']);
 
+/** Attributes of the wrapper element that are copied onto the sandboxed frame inside it. */
+const DELEGATED_ATTRIBUTES = ['allow', 'allowfullscreen', 'title'];
+
 /**
  * The runtime script the frame runs: Worker mode's, minus the global lockdown.
  * @param {{ networkFetch?: boolean, bridges?: boolean }} [options]  `networkFetch`: replace the
@@ -58,15 +61,18 @@ function escapeAttribute(text) {
  * blocked by it, while `eval`/`new Function`, imports, fetches and any
  * scripts in `html` are), then the caller's `html` in `<body>`.
  *
- * @param {{ source: string, token: string, csp?: string, html?: string }} parts
+ * `nested`: the frame sits inside andbox's `frameSrc` wrapper, so the host
+ * page is `parent.parent`; the handshake is with that window.
+ *
+ * @param {{ source: string, token: string, csp?: string, html?: string, nested?: boolean }} parts
  * @returns {string}
  */
-export function makeIframeDocument({ source, token, csp, html = '' }) {
+export function makeIframeDocument({ source, token, csp, html = '', nested = false }) {
   const bootstrap = `
 (function () {
   'use strict';
   var TOKEN = ${JSON.stringify(token)};
-  var parentWindow = window.parent;
+  var parentWindow = ${nested ? 'window.parent.parent' : 'window.parent'};
   var started = false;
   function onInit(e) {
     if (started || e.source !== parentWindow) return;
@@ -100,10 +106,60 @@ ${escapeInlineScript(source)}
 }
 
 /**
+ * The `frame-src` source list for `frameSrc`: `'none'` for an empty list.
+ * @param {string[]} frameSrc  validated by normalizeIframeOptions()
+ */
+export function frameSrcPolicy(frameSrc) {
+  return `frame-src ${frameSrc.length ? frameSrc.join(' ') : "'none'"}`;
+}
+
+/**
+ * Build the `frameSrc` wrapper's `srcdoc`: an empty document whose only
+ * policy is `frame-src`. Nothing else goes in it: the sandboxed frame is a
+ * srcdoc frame and inherits this document's policies, so a `script-src` or
+ * `default-src` here would block andbox's own bootstrap in it. (`frame-src`
+ * does not apply to the `about:srcdoc` frame itself, only to where frames in
+ * this document navigate.) The wrapper runs no script; the host builds the
+ * sandboxed frame in it through the DOM.
+ *
+ * @param {string[]} frameSrc
+ * @returns {string}
+ */
+export function makeWrapperDocument(frameSrc) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeAttribute(frameSrcPolicy(frameSrc))}"></head><body></body></html>`;
+}
+
+/**
+ * Validate `frameSrc`: CSP source expressions such as `'example.com'`,
+ * `'https://cdn.example.com'`, `'*.example.com'`, `'https:'` or `"'self'"`.
+ * Anything that could end the directive or the policy (`;`, `,`, whitespace)
+ * or add another keyword is refused rather than passed through.
+ *
+ * @returns {string[] | null}
+ */
+function normalizeFrameSrc(frameSrc) {
+  if (frameSrc === undefined || frameSrc === null) return null;
+  if (!Array.isArray(frameSrc) || !frameSrc.every((h) => typeof h === 'string')) {
+    throw new TypeError("frameSrc must be an array of hosts (CSP source expressions), e.g. ['https://example.com']");
+  }
+  const out = [];
+  for (const raw of frameSrc) {
+    const s = raw.trim();
+    const keyword = s.toLowerCase() === "'self'";
+    if (!keyword && !/^[^\s;,'"]+$/.test(s)) {
+      throw new TypeError(`frameSrc: '${raw}' is not a host or CSP source expression`);
+    }
+    const v = keyword ? "'self'" : s;
+    if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/**
  * Validate the iframe-only options. Throws on anything that would silently
  * weaken the boundary.
  *
- * @returns {{ tokens: string[], allowSameOrigin: boolean, csp: string | undefined, html: string, container: Element | null, onFrame: ((f: HTMLIFrameElement) => void) | null }}
+ * @returns {{ tokens: string[], allowSameOrigin: boolean, csp: string | undefined, html: string, container: Element | null, onFrame: ((f: HTMLIFrameElement) => void) | null, frameSrc: string[] | null }}
  */
 export function normalizeIframeOptions(options = {}) {
   const {
@@ -113,6 +169,7 @@ export function normalizeIframeOptions(options = {}) {
     html = '',
     container = null,
     onFrame = null,
+    frameSrc,
   } = options;
 
   if (!Array.isArray(iframeSandbox) || !iframeSandbox.every((t) => typeof t === 'string')) {
@@ -140,7 +197,7 @@ export function normalizeIframeOptions(options = {}) {
   if (container !== null && (typeof container !== 'object' || typeof container.appendChild !== 'function')) {
     throw new TypeError('container must be a DOM element');
   }
-  return { tokens, allowSameOrigin, csp: csp || undefined, html, container, onFrame };
+  return { tokens, allowSameOrigin, csp: csp || undefined, html, container, onFrame, frameSrc: normalizeFrameSrc(frameSrc) };
 }
 
 /**
@@ -148,7 +205,7 @@ export function normalizeIframeOptions(options = {}) {
  *
  * @param {ReturnType<typeof normalizeIframeOptions>} opts
  * @param {number} startupTimeoutMs  how long to wait for a new frame's handshake
- * @returns {{ factory: (source: string) => object, current: () => HTMLIFrameElement | null }}
+ * @returns {{ factory: (source: string) => object, current: () => HTMLIFrameElement | null, currentWindow: () => Window | null }}
  */
 export function createIframeFactory(opts, startupTimeoutMs) {
   const win = globalThis;
@@ -158,6 +215,7 @@ export function createIframeFactory(opts, startupTimeoutMs) {
       "mode: 'iframe' needs a DOM (a browser page with `document`); it is not available under Node or inside a Worker."
     );
   }
+  const nested = opts.frameSrc !== null;
   // Where the last frame was, so a restart puts its replacement in the same
   // spot with the same attributes (class, style, width, ...).
   let slot = null;
@@ -165,6 +223,10 @@ export function createIframeFactory(opts, startupTimeoutMs) {
 
   function factory(source) {
     const token = crypto.randomUUID() + crypto.randomUUID();
+    // `frame` is the element in the page (placement, attributes, onFrame,
+    // sandbox.iframe). Without frameSrc it is also the sandboxed frame; with
+    // it, it is the wrapper and the sandboxed frame (`inner`) is made inside
+    // it once the wrapper has loaded.
     const frame = doc.createElement('iframe');
     if (slot) {
       for (const [name, value] of slot.attributes) frame.setAttribute(name, value);
@@ -176,8 +238,14 @@ export function createIframeFactory(opts, startupTimeoutMs) {
       }
       frame.setAttribute('title', 'andbox sandbox');
     }
-    frame.setAttribute('sandbox', opts.tokens.join(' '));
-    frame.srcdoc = makeIframeDocument({ source, token, csp: opts.csp, html: opts.html });
+    const sandboxed = { frame: nested ? null : frame };
+    const srcdoc = makeIframeDocument({ source, token, csp: opts.csp, html: opts.html, nested });
+    if (nested) {
+      frame.srcdoc = makeWrapperDocument(opts.frameSrc);
+    } else {
+      frame.setAttribute('sandbox', opts.tokens.join(' '));
+      frame.srcdoc = srcdoc;
+    }
 
     const channel = new MessageChannel();
     const port = channel.port1;
@@ -188,6 +256,7 @@ export function createIframeFactory(opts, startupTimeoutMs) {
 
     const adapter = {
       iframe: frame,
+      get window() { return sandboxed.frame?.contentWindow ?? null; },
       dead: false,
       onmessage: null,
       onerror: null,
@@ -215,6 +284,7 @@ export function createIframeFactory(opts, startupTimeoutMs) {
             .filter((a) => !OWNED_ATTRIBUTES.has(a.name))
             .map((a) => [a.name, a.value]),
         };
+        // Removing the wrapper removes the sandboxed frame inside it too.
         frame.remove();
         if (current === adapter) current = null;
       },
@@ -237,12 +307,13 @@ export function createIframeFactory(opts, startupTimeoutMs) {
     // `event.origin` is checked too, but on its own it would prove nothing:
     // every opaque-origin frame reports 'null'.
     function onHello(event) {
-      if (terminated || event.source === null || event.source !== frame.contentWindow) return;
+      const target = sandboxed.frame;
+      if (terminated || !target || event.source === null || event.source !== target.contentWindow) return;
       const data = event.data;
       if (!data || data.type !== 'andbox:hello' || data.token !== token) return;
       if (expectedOrigin && event.origin !== expectedOrigin) return;
       cleanupHandshake();
-      frame.contentWindow.postMessage({ type: 'andbox:init', token }, '*', [channel.port2]);
+      target.contentWindow.postMessage({ type: 'andbox:init', token }, '*', [channel.port2]);
     }
 
     function cleanupHandshake() {
@@ -254,10 +325,44 @@ export function createIframeFactory(opts, startupTimeoutMs) {
     // means a different document now lives in the frame (the code navigated
     // or reloaded it, or the element was moved in the DOM), and the runtime
     // that held our port is gone.
-    let loads = 0;
-    frame.addEventListener('load', () => {
-      if (++loads > 1) fail('Sandbox iframe unloaded (it navigated, was reloaded, or was moved in the DOM)');
-    });
+    const UNLOADED = 'Sandbox iframe unloaded (it navigated, was reloaded, or was moved in the DOM)';
+    function watchLoads(el, onFirst) {
+      let loads = 0;
+      el.addEventListener('load', () => {
+        if (++loads > 1) fail(UNLOADED);
+        else onFirst?.();
+      });
+    }
+
+    // frameSrc: the wrapper has loaded (same origin, no script of its own);
+    // build the sandboxed frame in it. The wrapper document takes the
+    // element's color-scheme, so the sandboxed document's backdrop is painted
+    // as it would be without the wrapper.
+    function buildInner() {
+      if (terminated || adapter.dead) return;
+      let wdoc;
+      try { wdoc = frame.contentDocument; } catch { wdoc = null; }
+      if (!wdoc?.body) {
+        fail('Sandbox iframe wrapper (frameSrc) did not load as a same-origin document');
+        return;
+      }
+      const scheme = win.getComputedStyle?.(frame)?.colorScheme;
+      if (scheme) wdoc.documentElement.style.colorScheme = scheme;
+      wdoc.documentElement.style.height = '100%';
+      Object.assign(wdoc.body.style, { margin: '0', height: '100%', overflow: 'hidden' });
+      const inner = wdoc.createElement('iframe');
+      for (const name of DELEGATED_ATTRIBUTES) {
+        if (frame.hasAttribute(name)) inner.setAttribute(name, frame.getAttribute(name));
+      }
+      Object.assign(inner.style, { display: 'block', width: '100%', height: '100%', border: '0' });
+      inner.setAttribute('sandbox', opts.tokens.join(' '));
+      inner.srcdoc = srcdoc;
+      watchLoads(inner);
+      sandboxed.frame = inner;
+      wdoc.body.appendChild(inner);
+    }
+
+    watchLoads(frame, nested ? buildInner : null);
 
     win.addEventListener('message', onHello);
     if (startupTimeoutMs > 0) {
@@ -292,5 +397,6 @@ export function createIframeFactory(opts, startupTimeoutMs) {
   return {
     factory,
     current: () => current?.iframe ?? null,
+    currentWindow: () => current?.window ?? null,
   };
 }
