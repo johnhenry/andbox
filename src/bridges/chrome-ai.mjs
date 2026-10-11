@@ -183,20 +183,39 @@ function chromeAIClient(api) {
  * Tool-use content (`tool-call` / `tool-response`) holds platform objects
  * (LanguageModelToolCall, LanguageModelToolSuccess, LanguageModelToolError)
  * that cannot be cloned. In the sandbox they are plain objects with the same
- * fields; the host converts in both directions.
+ * fields; the host converts in both directions (andbox#52).
+ *
+ * The platform spells the id `callID`: its init dictionaries require it
+ * (`{ callId }` throws "Required member is undefined") and its objects expose
+ * it as a getter, together with `name` and `arguments`/`result`/
+ * `errorMessage`; they have no own properties, so they are read field by
+ * field. Chrome returns an empty `callID` in practice. The sandbox side
+ * accepts `callID` or the older `callId` and emits both; a missing id is ''.
  */
+function sandboxCallID(v) {
+  if (typeof v.callID === 'string') return v.callID;
+  if (typeof v.callId === 'string') return v.callId;
+  return '';
+}
+
+function platformCallID(v) {
+  const id = v.callID;
+  return typeof id === 'string' ? id : '';
+}
+
 function toPlatformContent(item, scope) {
   if (!isObject(item) || !isObject(item.value)) return item;
   const v = item.value;
+  const callID = sandboxCallID(v);
   if (item.type === 'tool-call' && typeof scope.LanguageModelToolCall === 'function') {
-    return { ...item, value: new scope.LanguageModelToolCall(v) };
+    return { ...item, value: new scope.LanguageModelToolCall({ callID, name: v.name, arguments: v.arguments }) };
   }
   if (item.type === 'tool-response') {
     if (v.errorMessage !== undefined && typeof scope.LanguageModelToolError === 'function') {
-      return { ...item, value: new scope.LanguageModelToolError(v) };
+      return { ...item, value: new scope.LanguageModelToolError({ callID, name: v.name, errorMessage: v.errorMessage }) };
     }
     if (typeof scope.LanguageModelToolSuccess === 'function') {
-      return { ...item, value: new scope.LanguageModelToolSuccess(v) };
+      return { ...item, value: new scope.LanguageModelToolSuccess({ callID, name: v.name, result: v.result }) };
     }
   }
   return item;
@@ -213,14 +232,17 @@ function toPlainContent(item) {
   if (!isObject(item) || item.value === null || typeof item.value !== 'object') return item;
   const v = item.value;
   if (item.type === 'tool-call') {
-    return { type: item.type, value: { callId: v.callId, name: v.name, arguments: v.arguments ?? null } };
+    const callID = platformCallID(v);
+    return { type: item.type, value: { callID, callId: callID, name: v.name, arguments: v.arguments ?? null } };
   }
   if (item.type === 'tool-response') {
+    const callID = platformCallID(v);
+    const errorMessage = v.errorMessage;
     return {
       type: item.type,
-      value: v.errorMessage !== undefined
-        ? { callId: v.callId, name: v.name, errorMessage: v.errorMessage }
-        : { callId: v.callId, name: v.name, result: v.result ? [...v.result] : [] },
+      value: errorMessage !== undefined
+        ? { callID, callId: callID, name: v.name, errorMessage }
+        : { callID, callId: callID, name: v.name, result: v.result ? [...v.result] : [] },
     };
   }
   return item;
@@ -337,6 +359,12 @@ export function chromeAI(options = {}) {
                 "and you append a 'tool-response'). Drop execute from the tool declarations.",
                 'NotSupportedError'
               );
+            }
+            // Chrome rejects tools unless the model may answer with a tool
+            // call, closed-loop included: refuse up front, with its message.
+            if (Array.isArray(rest.tools) && rest.tools.length > 0
+              && !(Array.isArray(rest.expectedOutputs) && rest.expectedOutputs.some((o) => isObject(o) && o.type === 'tool-call'))) {
+              throw new TypeError('When tools are provided, expectedOutputs must include {type: "tool-call"}');
             }
             createOpts = { ...rest, signal: ctx.signal };
             if (Array.isArray(rest.initialPrompts)) createOpts.initialPrompts = toPlatformPrompt(rest.initialPrompts, scope);

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.3 — Chrome AI bridge: tool use with the real Prompt API (`callID`) (2026-10-11)
+
+A fix; additive for callers. See [#52](https://github.com/johnhenry/andbox/issues/52).
+
+- **Fixed: every `tool-response` threw, and tool calls came back without an
+  id.** Chrome's Prompt API spells the id `callID`: its
+  `LanguageModelToolSuccess`, `LanguageModelToolError` and
+  `LanguageModelToolCall` inits require it (`{ callId }` throws "Required
+  member is undefined"), and a `LanguageModelToolCall` exposes `callID`,
+  `name` and `arguments` as getters. The bridge built the platform objects
+  from `callId` and read `v.callId`. It now uses `callID` with the platform
+  in both directions and builds each init from its known fields.
+- **Sandbox side: both spellings.** Tool calls arrive as
+  `{ callID, callId, name, arguments }`; tool responses and replayed tool
+  calls accept `callID` or `callId`. A missing id is `''`, which is also what
+  Chrome returns for the model's calls, so match responses by order or name.
+- **`create({ tools })` without `expectedOutputs: [{ type: 'tool-call' }]`**
+  is refused with Chrome's own `TypeError` ("When tools are provided,
+  expectedOutputs must include {type: "tool-call"}") before it reaches the
+  platform.
+- Types: `ChromeAIToolCall`, `ChromeAIToolResponse`.
+- Tests: the fake platform (`test/fixtures/fake-chrome-ai.mjs`) now models
+  Chrome 154: inits that require `callID` and throw Chrome's message, and
+  getter-only, uncloneable (`DataCloneError`, `JSON.stringify` is `{}`) tool
+  objects with an empty `callID`. `test/chrome-ai-bridge.test.mjs` covers the
+  open-loop round trip (prompt, tool call, success and error responses, final
+  text), both id spellings, replayed history and the `expectedOutputs` check;
+  `test/browser/bridges.spec.mjs` runs the round trip in a browser Worker and
+  iframe.
+
 ## 0.3.2 — iframe mode: `frameSrc`, so a frame can't navigate itself to any host (2026-10-11)
 
 Additive; nothing changes unless you pass `frameSrc`. See
