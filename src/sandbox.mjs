@@ -314,6 +314,7 @@ async function createServiceWorkerSandbox(options = {}) {
  * @property {string[]} [iframeSandbox] - mode: 'iframe': extra sandbox tokens ('allow-same-origin' needs dangerouslyAllowSameOrigin)
  * @property {boolean} [dangerouslyAllowSameOrigin] - mode: 'iframe': permit 'allow-same-origin' (removes the origin boundary)
  * @property {(iframe: HTMLIFrameElement) => void} [onFrame] - mode: 'iframe': called with every new frame before it is attached
+ * @property {string[]} [frameSrc] - mode: 'iframe': nest the frame in a same-origin wrapper whose CSP is `frame-src` these hosts, so the frame cannot navigate itself anywhere else (andbox#50)
  * @property {{ allowedHosts: string[] | '*' | ((url: URL) => boolean | Promise<boolean>), fetch?: Function, credentials?: RequestCredentials }} [network] - worker, node-worker and iframe modes: install a global `fetch` in the sandbox that goes through the host (andbox#39); `allowedHosts` is required (andbox#43)
  * @property {Record<string, object>} [bridges] - worker, node-worker and iframe modes: one global per entry that proxies a host API (handles, streams, abort, callbacks, consent, budgets; andbox#46)
  */
@@ -328,7 +329,7 @@ const BRIDGE_MODES = NETWORK_MODES;
  * Create a new sandboxed runtime.
  *
  * @param {SandboxOptions | ServiceWorkerSandboxOptions} [options]
- * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean, iframe?: HTMLIFrameElement | null }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
+ * @returns {{ execute: Function, terminate: Function } | Promise<{ evaluate: Function, defineModule: Function, dispose: Function, isDisposed: () => boolean, iframe?: HTMLIFrameElement | null, frameWindow?: Window | null }> | Promise<{ scriptURL: string, scope: string, define: Function, remove: Function, dispose: Function, isDisposed: () => boolean }>}
  */
 export function createSandbox(options = {}) {
   if (options.untrusted === true) {
@@ -985,6 +986,13 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     Object.defineProperty(sandbox, 'iframe', {
       enumerable: true,
       get: () => (disposed ? null : iframeHost.current()),
+    });
+    // The window of the document the code runs in (andbox#50): the frame's
+    // contentWindow, or with `frameSrc` the sandboxed frame's inside the
+    // wrapper. Not enumerable, so the sandbox's own keys are as before 0.3.2.
+    Object.defineProperty(sandbox, 'frameWindow', {
+      enumerable: false,
+      get: () => (disposed ? null : iframeHost.currentWindow()),
     });
   }
   return sandbox;

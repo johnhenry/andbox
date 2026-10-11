@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.2 — iframe mode: `frameSrc`, so a frame can't navigate itself to any host (2026-10-11)
+
+Additive; nothing changes unless you pass `frameSrc`. See
+[#50](https://github.com/johnhenry/andbox/issues/50) (for
+[johnhenry/miso#174](https://github.com/johnhenry/miso/issues/174)).
+
+- **`createSandbox({ mode: 'iframe', frameSrc: [hosts] })`.** A sandboxed
+  frame could navigate itself (`location = ...`, a clicked link, a meta
+  refresh) to any host: andbox replaced the frame afterwards, but the request
+  had been sent, and no CSP directive or sandbox token inside the frame can
+  prevent it. With `frameSrc` the frame is nested in a same-origin wrapper
+  frame (`srcdoc`, no script) whose only policy is `frame-src <hosts>`
+  (`'none'` for `[]`), which the browser checks before the navigation request
+  is made. A blocked navigation sends nothing; the frame is replaced as after
+  any navigation. The handshake, `evaluate()`, `host.call()`, consoles
+  (including per-call `consoleId`) and bridges work through the wrapper.
+- `sandbox.iframe`, `onFrame` and `container` are about the wrapper (the
+  element in your page); its `allow`, `allowfullscreen` and `title` are copied
+  to the frame inside it. Inside the frame the host page is `parent.parent`.
+- **`sandbox.frameWindow`** (iframe mode, with or without `frameSrc`; not
+  enumerable): the window the code runs in, for `postMessage` and
+  `event.source` checks.
+- Types: `IframeSandboxOptions.frameSrc`, `IframeSandbox.frameWindow`.
+- Tests: `test/browser/frame-src.spec.mjs` (Chromium, Firefox, WebKit) runs
+  local stub servers and checks that a blocked `location =`, link click and
+  meta refresh send no request (with a control showing each does without
+  `frameSrc`), that a listed host gets its request, and that evaluate,
+  consoles and bridges work through the wrapper; `test/iframe-mode.test.mjs`
+  covers the option validation and the generated documents.
+
 ## 0.3.1 — console output goes to the call that logged; errors keep the sandbox stack (2026-10-10)
 
 A fix, plus two additive fields. See [#41](https://github.com/johnhenry/andbox/issues/41).

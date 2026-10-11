@@ -8,7 +8,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSandbox, makeWorkerSource } from '../src/index.mjs';
-import { normalizeIframeOptions, makeIframeDocument, makeIframeRuntimeSource } from '../src/iframe-host.mjs';
+import { normalizeIframeOptions, makeIframeDocument, makeIframeRuntimeSource, makeWrapperDocument, frameSrcPolicy } from '../src/iframe-host.mjs';
 
 describe("mode: 'iframe' under Node", () => {
   it('rejects with a clear error: there is no DOM', async () => {
@@ -93,6 +93,45 @@ describe('makeIframeDocument', () => {
   it('registers no pagehide/unload listener (it would stall Chromium process shutdown after a kill)', () => {
     const doc = makeIframeDocument({ source, token: 't' });
     assert.doesNotMatch(doc, /addEventListener\(['"](pagehide|unload|beforeunload)/);
+  });
+});
+
+describe('frameSrc (andbox#50)', () => {
+  it('is null when unset, so nothing is nested', () => {
+    assert.equal(normalizeIframeOptions({}).frameSrc, null);
+  });
+
+  it('keeps hosts and source expressions, trimmed and once each; normalises the self keyword', () => {
+    const { frameSrc } = normalizeIframeOptions({
+      frameSrc: [' example.com ', 'https://cdn.example.com', '*.example.org', 'https:', "'SELF'", 'example.com', 'http://127.0.0.1:8080'],
+    });
+    assert.deepEqual(frameSrc, ['example.com', 'https://cdn.example.com', '*.example.org', 'https:', "'self'", 'http://127.0.0.1:8080']);
+  });
+
+  it('refuses anything that could end the directive or add a keyword', () => {
+    assert.throws(() => normalizeIframeOptions({ frameSrc: 'example.com' }), TypeError);
+    assert.throws(() => normalizeIframeOptions({ frameSrc: [42] }), TypeError);
+    for (const bad of ['a.com; script-src *', 'a.com b.com', 'a.com,b.com', "'unsafe-inline'", "'none'", '"x"', '']) {
+      assert.throws(() => normalizeIframeOptions({ frameSrc: [bad] }), /frameSrc/, bad);
+    }
+  });
+
+  it("an empty list is frame-src 'none'", () => {
+    assert.equal(frameSrcPolicy([]), "frame-src 'none'");
+    assert.equal(frameSrcPolicy(['a.com', 'https://b.com']), 'frame-src a.com https://b.com');
+  });
+
+  it('the wrapper document has only a frame-src policy and no script (the sandboxed srcdoc frame inherits its policies)', () => {
+    const doc = makeWrapperDocument(['https://a.com', "'self'"]);
+    assert.match(doc, /<meta http-equiv="Content-Security-Policy" content="frame-src https:\/\/a\.com 'self'">/);
+    assert.doesNotMatch(doc, /<script/i);
+    assert.doesNotMatch(doc, /(default|script|style)-src/);
+  });
+
+  it('a nested frame handshakes with parent.parent (the host page), not the wrapper', () => {
+    const source = makeIframeRuntimeSource();
+    assert.match(makeIframeDocument({ source, token: 't', nested: true }), /var parentWindow = window\.parent\.parent;/);
+    assert.match(makeIframeDocument({ source, token: 't' }), /var parentWindow = window\.parent;/);
   });
 });
 
