@@ -122,22 +122,98 @@ describe('#46 chromeAI: the Prompt API through the bridge', () => {
     assert.deepEqual(r.detected[0], { detectedLanguage: 'fr', confidence: 0.9 });
   });
 
-  it('open-loop tool use: tool-call results arrive as plain objects, tool-response inputs become platform objects', async () => {
+  it('#52 the fake models Chrome 154: inits require callID, instances are getter-only and not cloneable', () => {
+    const { scope } = createFakeChromeAI();
+    const call = new scope.LanguageModelToolCall({ callID: '', name: 'add', arguments: { a: 1 } });
+    assert.deepEqual([call.callID, call.name, call.arguments], ['', 'add', { a: 1 }]);
+    assert.equal(JSON.stringify(call), '{}');
+    assert.deepEqual(Object.keys(call), []);
+    assert.throws(() => structuredClone(call), { name: 'DataCloneError' });
+    for (const [C, dict] of [['LanguageModelToolCall', 'LanguageModelToolCallInit'], ['LanguageModelToolSuccess', 'LanguageModelToolSuccessInit'], ['LanguageModelToolError', 'LanguageModelToolErrorInit']]) {
+      assert.throws(() => new scope[C]({ callId: 'x', name: 'add', result: [], errorMessage: 'e', arguments: {} }), {
+        name: 'TypeError',
+        message: `Failed to read the 'callID' property from '${dict}': Required member is undefined.`,
+      });
+    }
+  });
+
+  const TOOLS = `
+    tools: [{ name: 'lookup', description: 'Look something up', inputSchema: { type: 'object' } }],
+    expectedOutputs: [{ type: 'text' }, { type: 'tool-call' }],
+    expectedInputs: [{ type: 'text' }, { type: 'tool-response' }],
+  `;
+
+  it('#52 open-loop round trip: prompt, tool-call (empty callID, as Chrome), tool-response success and error, final text', async () => {
     const fake = createFakeChromeAI();
     const sb = await make({ bridges: { ai: chromeAI({ scope: fake.scope }) } });
     const r = await sb.evaluate(`
-      const s = await ai.languageModel.create({
-        tools: [{ name: 'lookup', description: 'Look something up', inputSchema: { type: 'object' } }],
-        expectedOutputs: [{ type: 'text' }, { type: 'tool-call' }],
-        expectedInputs: [{ type: 'text' }, { type: 'tool-response' }],
-      });
+      const s = await ai.languageModel.create({ ${TOOLS} });
       const first = await s.prompt('use a tool');
       const call = first.find((c) => c.type === 'tool-call').value;
-      const second = await s.prompt([{ role: 'user', content: [{ type: 'tool-response', value: { callId: call.callId, name: call.name, result: [{ type: 'object', value: { ok: 1 } }] } }] }]);
-      return { first, second };
+      // Reply exactly as received: the plain call carries callID (and callId).
+      const ok = await s.prompt([{ role: 'user', content: [{ type: 'tool-response', value: { callID: call.callID, name: call.name, result: [{ type: 'text', value: '42' }] } }] }]);
+      const failed = await s.prompt([{ role: 'user', content: [{ type: 'tool-response', value: { callID: call.callID, name: call.name, errorMessage: 'no such row' } }] }]);
+      return { first, ok, failed };
     `);
-    assert.deepEqual(r.first, [{ type: 'text', value: 'calling' }, { type: 'tool-call', value: { callId: 'c1', name: 'lookup', arguments: { q: 1 } } }]);
-    assert.equal(r.second, 'tool said [{"type":"object","value":{"ok":1}}]');
+    assert.deepEqual(r.first, [{ type: 'text', value: 'calling' }, { type: 'tool-call', value: { callID: '', callId: '', name: 'lookup', arguments: { q: 1 } } }]);
+    assert.equal(r.ok, 'tool said [{"type":"text","value":"42"}]');
+    assert.equal(r.failed, 'tool failed: no such row');
+    assert.deepEqual(fake.log.toolResponses, [
+      { kind: 'success', callID: '', name: 'lookup', result: [{ type: 'text', value: '42' }] },
+      { kind: 'error', callID: '', name: 'lookup', errorMessage: 'no such row' },
+    ]);
+  });
+
+  it('#52 the sandbox may send callId (older callers), callID, or no id; the platform always gets callID', async () => {
+    const fake = createFakeChromeAI({ toolCallID: 'c1' });
+    const sb = await make({ bridges: { ai: chromeAI({ scope: fake.scope }) } });
+    const r = await sb.evaluate(`
+      const s = await ai.languageModel.create({ ${TOOLS} });
+      const call = (await s.prompt('use a tool')).find((c) => c.type === 'tool-call').value;
+      const reply = (value) => s.prompt([{ role: 'user', content: [{ type: 'tool-response', value }] }]);
+      await reply({ callId: call.callId, name: call.name, result: [{ type: 'object', value: { ok: 1 } }] });
+      await reply({ callID: 'c2', callId: 'ignored', name: 'lookup', errorMessage: 'boom' });
+      await reply({ name: 'lookup', result: [] });
+      return call;
+    `);
+    assert.deepEqual(r, { callID: 'c1', callId: 'c1', name: 'lookup', arguments: { q: 1 } });
+    assert.deepEqual(fake.log.toolResponses.map((t) => [t.kind, t.callID]), [['success', 'c1'], ['error', 'c2'], ['success', '']]);
+  });
+
+  it('#52 a tool-call in initialPrompts (replayed history) becomes a LanguageModelToolCall built from callID', async () => {
+    const fake = createFakeChromeAI();
+    const sb = await make({ bridges: { ai: chromeAI({ scope: fake.scope }) } });
+    await sb.evaluate(`
+      await ai.languageModel.create({ ${TOOLS}
+        initialPrompts: [
+          { role: 'user', content: 'add 17 and 25' },
+          { role: 'assistant', content: [{ type: 'tool-call', value: { callId: 'old', name: 'lookup', arguments: { a: 17, b: 25 } } }] },
+          { role: 'assistant', content: [{ type: 'tool-call', value: { name: 'lookup', arguments: {} } }] },
+        ],
+      });
+    `);
+    assert.deepEqual(fake.log.toolCalls, [
+      { callID: 'old', name: 'lookup', arguments: { a: 17, b: 25 } },
+      { callID: '', name: 'lookup', arguments: {} },
+    ]);
+  });
+
+  it("#52 tools without expectedOutputs { type: 'tool-call' } are refused with Chrome's message", async () => {
+    const fake = createFakeChromeAI();
+    const sb = await make({ bridges: { ai: chromeAI({ scope: fake.scope }) } });
+    const r = await sb.evaluate(`
+      const out = [];
+      for (const extra of [{}, { expectedOutputs: [{ type: 'text' }] }]) {
+        try { await ai.languageModel.create({ tools: [{ name: 't', description: 'd', inputSchema: {} }], ...extra }); out.push('created'); }
+        catch (e) { out.push([e.name, e.message]); }
+      }
+      const noTools = await ai.languageModel.create({ tools: [] });
+      out.push(typeof noTools.prompt);
+      return out;
+    `);
+    const refused = ['TypeError', 'When tools are provided, expectedOutputs must include {type: "tool-call"}'];
+    assert.deepEqual(r, [refused, refused, 'function']);
+    assert.equal(fake.log.createOptions.length, 1, 'refused before reaching the platform');
   });
 
   it('a tool with execute() is refused with a clear error (the Prompt API has no execute callback)', async () => {

@@ -49,5 +49,27 @@ export interface ChromeAIOptions {
   scope?: Record<string, unknown>;
 }
 
+/**
+ * A `tool-call` content value as the sandbox receives it from `prompt()`.
+ * The platform's id is `callID` (Chrome returns ''); `callId` is the same
+ * value under the name andbox 0.3.2 used.
+ */
+export interface ChromeAIToolCall {
+  callID: string;
+  callId: string;
+  name: string;
+  arguments: Record<string, unknown> | null;
+}
+
+/**
+ * A `tool-response` content value the sandbox sends back: `result` for
+ * success, `errorMessage` for an error. Pass `callID` or `callId` (missing
+ * means ''). `{ type: 'tool-call', value }` in `initialPrompts` or a prompt
+ * takes the same id fields plus `name` and `arguments`.
+ */
+export type ChromeAIToolResponse =
+  | { callID?: string; callId?: string; name: string; result: Array<{ type: string; value: unknown }> }
+  | { callID?: string; callId?: string; name: string; errorMessage: string };
+
 /** The Chrome built-in AI bridge: `createSandbox({ bridges: { ai: chromeAI() } })`. */
 export declare function chromeAI(options?: ChromeAIOptions): BridgeDefinition<{ inputTokens: number }>;

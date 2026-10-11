@@ -125,6 +125,27 @@ for (const mode of ['worker', 'iframe']) {
       expect(r.destroyed).toEqual([1]);
     });
 
+    test('#52 Chrome AI tool use against the fake: getter-only, uncloneable tool calls and callID inits', async ({ page }) => {
+      const r = await host(page, mode, async (make, lib) => {
+        const fake = lib.createFakeChromeAI();
+        const sb = await make({ bridges: { ai: lib.chromeAI({ scope: fake.scope }) } });
+        const value = await sb.evaluate(`
+          const s = await ai.languageModel.create({
+            tools: [{ name: 'add', description: 'Add two numbers', inputSchema: { type: 'object' } }],
+            expectedOutputs: [{ type: 'text' }, { type: 'tool-call' }],
+          });
+          const first = await s.prompt('use a tool');
+          const call = first.find((c) => c.type === 'tool-call').value;
+          const ok = await s.prompt([{ role: 'user', content: [{ type: 'tool-response', value: { callID: call.callID, name: call.name, result: [{ type: 'text', value: '42' }] } }] }]);
+          const failed = await s.prompt([{ role: 'user', content: [{ type: 'tool-response', value: { callId: call.callId, name: call.name, errorMessage: 'nope' } }] }]);
+          return { call, ok, failed };
+        `);
+        return { value, responses: fake.log.toolResponses.map((t) => [t.kind, t.callID]) };
+      });
+      expect(r.value).toEqual({ call: { callID: '', callId: '', name: 'add', arguments: { q: 1 } }, ok: 'tool said [{"type":"text","value":"42"}]', failed: 'tool failed: nope' });
+      expect(r.responses).toEqual([['success', ''], ['error', '']]);
+    });
+
     test('a model download waits for a click in the app: onRequest resolves from the click handler', async ({ page }) => {
       const pending = host(page, mode, async (make, lib) => {
         const fake = lib.createFakeChromeAI({ availability: 'downloadable' });

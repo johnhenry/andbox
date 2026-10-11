@@ -6,9 +6,20 @@
  *
  *   const fake = createFakeChromeAI({ availability: 'available' });
  *   chromeAI({ scope: fake.scope })   // or Object.assign(window, fake.scope)
+ *
+ * Tool use is modelled on Chrome 154 as measured (andbox#52):
+ * - LanguageModelToolCall / ToolSuccess / ToolError inits require `callID`
+ *   and throw Chrome's TypeError without it (`{ callId }` is not enough).
+ * - Their instances have no own properties, only prototype getters (`callID`,
+ *   `name`, `arguments` / `result` / `errorMessage`): `JSON.stringify` gives
+ *   '{}', and structuredClone / postMessage throw DataCloneError.
+ * - A tool call the model makes has `callID` '' (what Chrome returns), unless
+ *   `toolCallID` says otherwise.
+ * - create() with tools throws unless expectedOutputs includes
+ *   { type: 'tool-call' }.
  */
-export function createFakeChromeAI({ availability = 'available', contextWindow = 1000 } = {}) {
-  const log = { created: [], destroyed: [], prompts: [], aborted: 0, createOptions: [] };
+export function createFakeChromeAI({ availability = 'available', contextWindow = 1000, toolCallID = '' } = {}) {
+  const log = { created: [], destroyed: [], prompts: [], aborted: 0, createOptions: [], toolResponses: [], toolCalls: [] };
   const tokens = (input) => (typeof input === 'string' ? input : JSON.stringify(input)).split(/\s+/).filter(Boolean).length;
 
   function abortable(signal, work) {
@@ -49,6 +60,18 @@ export function createFakeChromeAI({ availability = 'available', contextWindow =
     static async create(options = {}) {
       log.createOptions.push(Object.keys(options).sort());
       if (availability === 'unavailable') throw new DOMException('The model is not available', 'NotSupportedError');
+      if (Array.isArray(options.tools) && options.tools.length
+        && !(options.expectedOutputs ?? []).some((o) => o?.type === 'tool-call')) {
+        throw new TypeError('When tools are provided, expectedOutputs must include {type: "tool-call"}');
+      }
+      for (const m of options.initialPrompts ?? []) {
+        for (const c of Array.isArray(m.content) ? m.content : []) {
+          if (c.type === 'tool-call') {
+            if (!(c.value instanceof LanguageModelToolCall)) throw new TypeError("Failed to read the 'value' property: not a LanguageModelToolCall");
+            log.toolCalls.push({ callID: c.value.callID, name: c.value.name, arguments: c.value.arguments });
+          }
+        }
+      }
       await simulateDownload(options);
       if (options.signal?.aborted) throw options.signal.reason;
       const s = new LanguageModel(options);
@@ -66,12 +89,23 @@ export function createFakeChromeAI({ availability = 'available', contextWindow =
         if (this.tools && input === 'use a tool') {
           return [
             { type: 'text', value: 'calling' },
-            { type: 'tool-call', value: new LanguageModelToolCall({ callId: 'c1', name: this.tools[0].name, arguments: { q: 1 } }) },
+            { type: 'tool-call', value: new LanguageModelToolCall({ callID: toolCallID, name: this.tools[0].name, arguments: { q: 1 } }) },
           ];
         }
         if (Array.isArray(input)) {
           const resp = input.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((c) => c.type === 'tool-response');
-          if (resp) return `tool said ${resp.value instanceof LanguageModelToolSuccess ? JSON.stringify(resp.value.result) : 'not converted'}`;
+          if (resp) {
+            const v = resp.value;
+            if (v instanceof LanguageModelToolSuccess) {
+              log.toolResponses.push({ kind: 'success', callID: v.callID, name: v.name, result: v.result });
+              return `tool said ${JSON.stringify(v.result)}`;
+            }
+            if (v instanceof LanguageModelToolError) {
+              log.toolResponses.push({ kind: 'error', callID: v.callID, name: v.name, errorMessage: v.errorMessage });
+              return `tool failed: ${v.errorMessage}`;
+            }
+            return 'not converted';
+          }
         }
         return `echo: ${input}`;
       });
@@ -95,12 +129,37 @@ export function createFakeChromeAI({ availability = 'available', contextWindow =
     destroy() { this.#destroyed = true; log.destroyed.push(this.id); }
   }
 
+  // Platform objects: the fields live outside the object and are read through
+  // prototype getters; the instance is a Proxy so structured clone refuses it
+  // (DataCloneError) as it refuses a real platform object.
+  const fields = new WeakMap();
+  function platformObject(self, init, dictionary, members) {
+    if (init === null || typeof init !== 'object') throw new TypeError(`Failed to construct: parameter 1 is not of type '${dictionary}'.`);
+    if (init.callID === undefined) {
+      throw new TypeError(`Failed to read the 'callID' property from '${dictionary}': Required member is undefined.`);
+    }
+    const data = { callID: String(init.callID) };
+    for (const m of members) data[m] = init[m];
+    const proxy = new Proxy(self, {});
+    fields.set(proxy, data);
+    return proxy;
+  }
+  const getter = (name) => function () { return fields.get(this)?.[name]; };
+  function defineGetters(C, names) {
+    for (const n of names) Object.defineProperty(C.prototype, n, { get: getter(n), enumerable: true, configurable: true });
+  }
   class LanguageModelToolCall {
-    constructor({ callId, name, arguments: args }) { this.callId = callId; this.name = name; this.arguments = args; }
+    constructor(init) { return platformObject(this, init, 'LanguageModelToolCallInit', ['name', 'arguments']); }
   }
+  defineGetters(LanguageModelToolCall, ['callID', 'name', 'arguments']);
   class LanguageModelToolSuccess {
-    constructor({ callId, name, result }) { this.callId = callId; this.name = name; this.result = result; }
+    constructor(init) { return platformObject(this, init, 'LanguageModelToolSuccessInit', ['name', 'result']); }
   }
+  defineGetters(LanguageModelToolSuccess, ['callID', 'name', 'result']);
+  class LanguageModelToolError {
+    constructor(init) { return platformObject(this, init, 'LanguageModelToolErrorInit', ['name', 'errorMessage']); }
+  }
+  defineGetters(LanguageModelToolError, ['callID', 'name', 'errorMessage']);
 
   class Summarizer {
     constructor(options) { this.type = options.type ?? 'key-points'; this.format = options.format ?? 'markdown'; this.length = options.length ?? 'short'; this.inputQuota = 500; this.sharedContext = options.sharedContext ?? ''; }
@@ -123,6 +182,6 @@ export function createFakeChromeAI({ availability = 'available', contextWindow =
 
   return {
     log,
-    scope: { LanguageModel, LanguageModelToolCall, LanguageModelToolSuccess, Summarizer, LanguageDetector },
+    scope: { LanguageModel, LanguageModelToolCall, LanguageModelToolSuccess, LanguageModelToolError, Summarizer, LanguageDetector },
   };
 }
