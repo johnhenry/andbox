@@ -300,7 +300,7 @@ async function sandboxImport(specifier) {
 
 // ── Capability RPC ──
 // Works without crypto.randomUUID (insecure contexts, andbox#55).
-${randomId.toString()}
+const randomId = ${randomId.toString()};
 const pendingRpc = new Map();
 
 function callCapability(name, args) {
