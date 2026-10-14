@@ -8,6 +8,7 @@
  */
 
 import { installBridges } from './bridge-client.mjs';
+import { randomId } from './random-id.mjs';
 
 /**
  * The in-sandbox half of `createSandbox({ network })` (andbox#39): installs a
@@ -298,12 +299,14 @@ async function sandboxImport(specifier) {
 }
 
 // ── Capability RPC ──
+// Works without crypto.randomUUID (insecure contexts, andbox#55).
+${randomId.toString()}
 const pendingRpc = new Map();
 
 function callCapability(name, args) {
   // Random (not sequential) id -- see host-side evaluate() for rationale:
   // predictable ids let concurrent code guess and forge matching messages.
-  const id = crypto.randomUUID();
+  const id = randomId();
   return new Promise((resolve, reject) => {
     pendingRpc.set(id, { resolve, reject });
     post({ type: 'capabilityCall', id, name, args });

@@ -15,6 +15,7 @@
  * Worker mode unchanged.
  */
 
+import { randomId } from './random-id.mjs';
 import { makeRuntimeSource } from './worker-source.mjs';
 
 /** The sandbox token andbox always sets; the frame cannot run code without it. */
@@ -222,7 +223,7 @@ export function createIframeFactory(opts, startupTimeoutMs) {
   let current = null;
 
   function factory(source) {
-    const token = crypto.randomUUID() + crypto.randomUUID();
+    const token = randomId() + randomId();
     // `frame` is the element in the page (placement, attributes, onFrame,
     // sandbox.iframe). Without frameSrc it is also the sandboxed frame; with
     // it, it is the wrapper and the sandboxed frame (`inner`) is made inside

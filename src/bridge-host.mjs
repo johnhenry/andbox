@@ -16,6 +16,8 @@
  * of them when `close()` is called (dispose, timeout, abort, crash).
  */
 
+import { randomId } from './random-id.mjs';
+
 const MARK = '__andbox_bridge__';
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 const MAX_DEPTH = 64;
@@ -404,7 +406,7 @@ export function createBridgeHost(defs) {
       const proxy = (...args) => new Promise((resolve, reject) => {
         if (closed) { reject(makeDomError('The sandbox is gone', 'InvalidStateError')); return; }
         if (releasedCallbacks.has(id)) { reject(makeDomError('The sandbox function was released', 'InvalidStateError')); return; }
-        const rid = crypto.randomUUID();
+        const rid = randomId();
         pendingCallbacks.set(rid, { resolve, reject });
         try {
           send({ type: 'bridgeCallback', id: rid, bridge: inst.name, callback: id, args });
@@ -469,7 +471,7 @@ export function createBridgeHost(defs) {
         destroyTarget(fake);
         throw makeDomError(`Bridge '${inst.name}': handle limit reached (${max}); destroy() one first`, 'QuotaExceededError');
       }
-      const id = crypto.randomUUID();
+      const id = randomId();
       const h = { id, inst, type: ref.type, typeDef, target: ref.target, callbacks: [], calls: new Set() };
       handles.set(id, h);
       owner?.created?.push(id);
@@ -631,7 +633,7 @@ export function createBridgeHost(defs) {
           endCall(rec);
           return;
         }
-        const sid = crypto.randomUUID();
+        const sid = randomId();
         const s = { id: sid, inst, rec, puller, reading: false, closed: false };
         rec.stream = s;
         streams.set(sid, s);

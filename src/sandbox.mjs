@@ -10,6 +10,7 @@
  * - Capability gating with rate limits
  */
 
+import { randomId } from './random-id.mjs';
 import { makeWorkerSource } from './worker-source.mjs';
 import { makeWasmWorkerSource } from './wasm-worker-source.mjs';
 import { resolveWithImportMap } from './import-map-resolver.mjs';
@@ -834,11 +835,11 @@ async function createWorkerSandbox(options = {}, kind = 'worker') {
     // Random (not sequential) id so code running during one evaluate() call
     // can't guess the id of a concurrent evaluate() on the same worker and
     // forge a matching message to interfere with it.
-    const id = crypto.randomUUID();
+    const id = randomId();
     // Per-call nonce: the worker echoes it in its `result`; a result whose
     // nonce does not match is dropped. Held only by the host and the worker's
     // message handler, never exposed to evaluated code.
-    const nonce = crypto.randomUUID() + crypto.randomUUID();
+    const nonce = randomId() + randomId();
     const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs;
     const { promise, resolve, reject } = makeDeferred();
 
