@@ -41,7 +41,24 @@ export function installBridges(post) {
   const WeakMapCtor = WeakMap;
   const ErrorCtor = Error;
   const NATIVE_ERRORS = { TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError };
-  const randomUUID = G.crypto.randomUUID.bind(G.crypto);
+  // crypto.randomUUID exists only in secure contexts (andbox#55); this runs
+  // stringified in the worker, so it cannot import src/random-id.mjs.
+  const cryptoObj = G.crypto;
+  const getRandomValues = cryptoObj.getRandomValues.bind(cryptoObj);
+  const Uint8ArrayCtor = Uint8Array;
+  const randomUUID = typeof cryptoObj.randomUUID === 'function'
+    ? cryptoObj.randomUUID.bind(cryptoObj)
+    : () => {
+      const b = getRandomValues(new Uint8ArrayCtor(16));
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      let s = '';
+      for (let i = 0; i < 16; i++) {
+        if (i === 4 || i === 6 || i === 8 || i === 10) s += '-';
+        s += (b[i] + 0x100).toString(16).slice(1);
+      }
+      return s;
+    };
   const defineProperty = Object.defineProperty;
   const getPrototypeOf = Object.getPrototypeOf;
   const keys = Object.keys;

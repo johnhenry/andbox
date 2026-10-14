@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.4 — Ids no longer need `crypto.randomUUID` (2026-10-14)
+
+A fix; no API change. See [#55](https://github.com/johnhenry/andbox/issues/55).
+
+- **Fixed: `host.call()` from a Blob Worker made by an opaque-origin frame threw
+  "crypto.randomUUID is not a function".** `randomUUID` exists only in secure
+  contexts and such a Worker is not one. Every place andbox mints an id (the
+  worker's capability-call ids, the bridge client, and the host's evaluate ids,
+  nonces, frame tokens and bridge callback ids) now uses `randomUUID` when it
+  exists and otherwise builds a v4-shaped id from `crypto.getRandomValues`,
+  which works in insecure contexts. Ids stay random and unguessable.
+- Tests: `test/insecure-context.test.mjs` removes `crypto.randomUUID` (host and
+  the worker thread, via a preload) and checks `host.call()` still works.
+
 ## 0.3.3 — Chrome AI bridge: tool use with the real Prompt API (`callID`) (2026-10-11)
 
 A fix; additive for callers. See [#52](https://github.com/johnhenry/andbox/issues/52).
