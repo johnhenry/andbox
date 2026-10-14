@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.5 — Minified builds work again (2026-10-14)
+
+A fix; no API change. See [#58](https://github.com/johnhenry/andbox/issues/58).
+
+- **Fixed: every sandbox Worker failed with "randomId is not defined" when andbox
+  was minified (including via esm.sh).** The generated worker source inlined
+  `randomId` with `toString()` and then called it by name; a minifier renames the
+  function, so the call dangled. The name is now bound explicitly
+  (`const randomId = ...;`), as `installBridges` already was.
+- Tests: `test/minified-bundle.test.mjs` minifies the library with esbuild and
+  runs a real sandbox from the output.
+
 ## 0.3.4 — Ids no longer need `crypto.randomUUID` (2026-10-14)
 
 A fix; no API change. See [#55](https://github.com/johnhenry/andbox/issues/55).
