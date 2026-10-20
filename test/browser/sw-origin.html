@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>andbox service-worker origin</title></head>
+<body>
+<!--
+  The "dedicated sandbox origin" page of service-worker-opaque.spec.mjs: loaded
+  in a frame from an origin other than the host's. It registers the Service
+  Worker for ITS OWN origin (the one place a registration is visible to the
+  frame's navigations), then navigates itself to the served site.
+-->
+<script type="module">
+  import { createSandbox } from '/src/index.mjs';
+  import { files } from '/test/browser/fixtures/sw-site.mjs';
+  await createSandbox({ mode: 'service-worker', scriptURL: '/andbox-sw.js', scope: '/virtual/', files });
+  location.replace('/virtual/index.html');
+</script>
+</body>
+</html>
