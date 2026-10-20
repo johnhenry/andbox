@@ -13,6 +13,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeServiceWorkerSource } from '../../src/service-worker-source.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const port = Number(process.argv[2]) || 47391;
@@ -29,6 +30,12 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/__redirect') {
     // network-fetch.spec.mjs: a real 302 for the redirect rules of network.allowedHosts.
     res.writeHead(302, { Location: url.searchParams.get('to') || '/package.json', 'Access-Control-Allow-Origin': '*' }).end();
+    return;
+  }
+  if (url.pathname === '/andbox-sw.js') {
+    // service-worker-opaque.spec.mjs: the Service Worker script, served from this origin
+    // (registration needs a real same-origin http(s) URL, not a blob:).
+    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' }).end(makeServiceWorkerSource());
     return;
   }
   const rel = decodeURIComponent(url.pathname);

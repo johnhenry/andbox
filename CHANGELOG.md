@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.6 — Service-worker mode and opaque-origin frames, documented and tested (2026-10-20)
+
+Documentation and tests; no API change. See [#60](https://github.com/johnhenry/andbox/issues/60).
+
+- **Documented: `mode: 'service-worker'` does not serve a `mode: 'iframe'` frame.** A
+  Service Worker registered by the host page is not used for the navigation of a
+  `sandbox="allow-scripts"` (opaque-origin) frame, so the frame's request goes to the
+  network. README ("Serving a multi-file site to a sandboxed frame") says what to do
+  instead: a dedicated sandbox origin that registers the worker for itself and is
+  framed cross-origin.
+- Tests: `test/browser/service-worker-opaque.spec.mjs` (Chromium and Firefox) pins the
+  opaque-frame result and the dedicated-origin setup; `test/browser/serve.mjs` now
+  serves `/andbox-sw.js` for it.
+
 ## 0.3.5 — Minified builds work again (2026-10-14)
 
 A fix; no API change. See [#58](https://github.com/johnhenry/andbox/issues/58).

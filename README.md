@@ -699,6 +699,17 @@ await site.dispose(); // unregisters the Service Worker
 
 See `examples/06-service-worker-mode/` for a complete, runnable (browser-only) demo, including the dev server that serves the generated script.
 
+#### Serving a multi-file site to a sandboxed frame
+
+[`mode: 'iframe'`](#mode-iframe) runs code in `<iframe sandbox="allow-scripts">`, an opaque origin. Measured in Chromium and Firefox ([andbox#60](https://github.com/johnhenry/andbox/issues/60); WebKit not measured), **a Service Worker registered by your page does not serve such a frame**:
+
+- The frame's navigation (`frame.src = '/virtual/index.html'`) is not handled by the worker. It goes to the network (`fromServiceWorker` is false), so you get whatever your server has at that path, normally a 404. A Service Worker serves clients that have a real origin, and an opaque origin has none.
+- So `service-worker` mode does not compose with `iframe` mode, and neither does anything that needs the worker to see the frame's subresource requests (`<script src>`, `<link>`, `fetch`, module imports). Do not give such a frame `allow-same-origin` to make it work: that puts it in your origin, where it can reach your page and storage (see `iframeSandbox`).
+
+What works is a **dedicated sandbox origin**: serve the site from a second origin (another host name or subdomain, e.g. `sandbox.example.com`) that you control, and have a page *on that origin* call `createSandbox({ mode: 'service-worker', ... })` for itself, then show the site. Frame that origin from your page with `sandbox="allow-scripts allow-same-origin"`: `allow-same-origin` here means "keep the frame's own origin", which is not yours, so the browser's same-origin policy still keeps the code away from your page and storage (`parent.document` throws). The registration must be made by a page on the sandbox origin; one registered by your page on your origin is not visible to it. `test/browser/service-worker-opaque.spec.mjs` runs both cases (`sw-origin.html` is the sandbox-origin page): the opaque frame is not served, and the framed second origin gets the whole site (stylesheet, classic and module scripts, `fetch`, images) with the host page unreadable.
+
+That gives a real origin boundary, but not andbox's other guarantees: the site's code runs on a normal origin with network access, and `host.call()`, capabilities, bridges, `frameSrc` and fuel/time limits do not apply to it. For code that only needs your files as modules, [`createVirtualModuleRegistry()`](#createvirtualmoduleregistryfiles-options) `blob:` URLs are minted in your page's origin; how an opaque frame can use them is not covered by this measurement.
+
 ### `makeServiceWorkerSource()`
 
 Returns the Service Worker script source code as a string, for `mode: 'service-worker'`. Unlike `makeWorkerSource()`'s output (turned into a `blob:` URL for `new Worker(...)`), this string must be served as a real same-origin file -- Service Worker registration doesn't accept `blob:` scriptURLs.
